@@ -1,0 +1,12 @@
+[package]
+name = "clean-lang"
+version = "0.1.0"
+authors = ["SpiveeWorks <spiveehere@gmail.com>"]
+edition = "2018"
+
+[build-dependencies]
+lalrpop = "0.16.3"
+
+[dependencies]
+lalrpop-util = "0.16.3"
+regex = "1.1.6"
