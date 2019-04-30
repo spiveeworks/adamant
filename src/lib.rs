@@ -22,7 +22,7 @@ enum Type {
 pub enum TypeExpr {
     Bitset(u8),
     Struct(HashMap<String, TypeExpr>),
-    Array(Box<TypeExpr>, usize),
+    Array(Box<TypeExpr>, Box<Expr>),
     VarArray(Box<TypeExpr>),
     Ptr(Box<TypeExpr>),
 }
@@ -45,6 +45,7 @@ pub enum Expr {
     Field(Box<Expr>, String),
     Index(Box<Expr>),
     Plus(Box<(Expr, Expr)>),
+    IntegerLiteral(u64),
     StructLiteral(HashMap<String, Expr>),
     ArrayLiteral(Vec<Expr>),
     Call(String, Vec<Expr>),
@@ -60,12 +61,13 @@ pub enum Statement {
 
 pub enum Item {
     TypeDef(String, TypeExpr),
-    Function(String, HashMap<String, TypeExpr>, Vec<Statement>),
+    Function(String, Vec<(String, TypeExpr)>, Vec<Statement>),
 }
 
 pub fn eval(bindings: &HashMap<String, Data>, expr: &Expr) -> Data {
     match expr {
         Expr::Ident(name) => bindings[name].clone(),
+        &Expr::IntegerLiteral(val) => Data::Binary { size: 64, val },
         _ => unimplemented!(),
     }
 }

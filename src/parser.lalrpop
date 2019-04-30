@@ -6,9 +6,52 @@ pub Items: Vec<Item> = {
 };
 
 Item: Item = {
+    <name: Ident> ":="
+        "(" <params: Comma<Ascription>> ")" <ret: ("->" <TypeExpr>)?>
+        "{" <body: Statement*> "}"
+            => Item::Function(name, params, body),
+    <Ident> ":=" <TypeExpr> => Item::TypeDef(<>),
+};
+
+TypeExpr: TypeExpr = {
+    "b8" => TypeExpr::Bitset(8),
+    "b64" => TypeExpr::Bitset(64),
+    "{" <fields: Comma<Ascription>> "}" => TypeExpr::Struct(fields.into_iter().collect()),
+    "[" <inner: TypeExpr> "*" <size: Expr> "]" => TypeExpr::Array(Box::new(inner), Box::new(size)),
+    "[" <inner: TypeExpr> "]" => TypeExpr::VarArray(Box::new(inner)),
+    "*" <TypeExpr> => TypeExpr::Ptr(Box::new(<>)),
+};
+
+Statement: Statement = {
+    <Ident> ":=" <Expr> ";" => Statement::Define(<>),
+    <Expr> "<-" <Expr> ";" => Statement::Write(<>),
+    <Expr> ";" => Statement::Discard(<>),
+    "return" <Expr> ";" => Statement::Return(<>),
+    "while" <Expr> "{" <Statement*> "}" => Statement::While(<>),
+};
+
+Expr: Expr = {
+    r"[0-9]*" => Expr::IntegerLiteral(<>.parse().unwrap()),
+};
+
+Ascription: (String, TypeExpr) = {
+    <Ident> ":" <TypeExpr>,
 };
 
 Ident: String = {
     r"[a-zA-Z_][a-zA-Z0-9_]*" => <>.into(),
+};
+
+// taken directly from
+// http://lalrpop.github.io/lalrpop/tutorial/007_macros.html
+Comma<T>: Vec<T> = {
+    <v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            let mut v = v;
+            v.push(e);
+            v
+        }
+    }
 };
 
