@@ -31,7 +31,18 @@ Statement: Statement = {
 };
 
 Expr: Expr = {
+    "auto" <TypeExpr> => Expr::AutoAlloc(<>),
+    "alloc" <TypeExpr> => Expr::GenAlloc(<>),
+    // "*" <Expr> => Expr::Deref(Box::new(<>)),
+    <Ident> => Expr::Ident(<>),
+    <data: Expr> "." <field: Ident> => Expr::Field(Box::new(data), field),
+    <Expr> "[" <Expr> "]" => Expr::Index(Box::new((<>))),
+    //<Expr> "+" <Expr> => Expr::Plus(Box::new((<>))),
     r"[0-9]*" => Expr::IntegerLiteral(<>.parse().unwrap()),
+    "{" <vals: Comma<(<Ident> ":=" <Expr>)>> "}" =>
+        Expr::StructLiteral(vals.into_iter().collect()),
+    "[" <Comma<Expr>> "]" => Expr::ArrayLiteral(<>),
+    <f: Expr> "(" <args: Comma<Expr>> ")" => Expr::Call(Box::new(f), args),
 };
 
 Ascription: (String, TypeExpr) = {

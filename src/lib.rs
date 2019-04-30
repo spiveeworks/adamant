@@ -27,7 +27,7 @@ pub enum TypeExpr {
     Ptr(Box<TypeExpr>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Data {
     Binary { size: u8, val: u64 },
     Array(Vec<Data>),
@@ -43,12 +43,12 @@ pub enum Expr {
     Deref(Box<Expr>),
     Ident(String),
     Field(Box<Expr>, String),
-    Index(Box<Expr>),
+    Index(Box<(Expr, Expr)>),
     Plus(Box<(Expr, Expr)>),
     IntegerLiteral(u64),
     StructLiteral(HashMap<String, Expr>),
     ArrayLiteral(Vec<Expr>),
-    Call(String, Vec<Expr>),
+    Call(Box<Expr>, Vec<Expr>),
 }
 
 pub enum Statement {
@@ -64,26 +64,95 @@ pub enum Item {
     Function(String, Vec<(String, TypeExpr)>, Vec<Statement>),
 }
 
-pub fn eval(bindings: &HashMap<String, Data>, expr: &Expr) -> Data {
+#[derive(Clone)]
+pub struct Context {
+    pub bindings: HashMap<String, Data>,
+    pub stack: Vec<Data>,
+    pub heap: Vec<Option<Data>>,
+}
+
+impl Context {
+    pub fn new() -> Self {
+        Context {
+            bindings: HashMap::new(),
+            stack: Vec::new(),
+            heap: Vec::new(),
+        }
+    }
+}
+
+const STACK_SIZE: usize = 1024;
+
+/*
+fn size_of(ctx: &mut Context, ty: &TypeExpr) -> Data {
+    match ty {
+        _ => unimplemented!(),
+    }
+}
+*/
+
+fn eval(ctx: &mut Context, expr: &Expr) -> Data {
     match expr {
-        Expr::Ident(name) => bindings[name].clone(),
+        Expr::AutoAlloc(_) => {
+            let val = ctx.stack.len() as u64;
+            ctx.stack.push(Data::Binary { size: 0, val: 0 });
+            Data::Binary { size: 64, val }
+        },
+        Expr::GenAlloc(_) => {
+            let mut index = 0;
+            while index < ctx.heap.len() && ctx.heap[index].is_some() {
+                index += 1;
+            }
+            let content = Some(Data::Binary { size: 0, val: 0 });
+            if ctx.heap.len() < index {
+                ctx.heap[index] = content;
+            } else {
+                ctx.heap.push(content);
+            }
+            let val = (index + STACK_SIZE) as u64;
+            Data::Binary { size: 64, val }
+        },
+        Expr::Ident(name) => ctx.bindings[name].clone(),
         &Expr::IntegerLiteral(val) => Data::Binary { size: 64, val },
         _ => unimplemented!(),
     }
 }
 
-pub fn execute(bindings: &mut HashMap<String, Data>, program: &Vec<Statement>) {
+pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> Data {
     let mut pc = 0;
     while pc < program.len() {
         match &program[pc] {
             Statement::Define(name, val) => {
-                bindings.insert(name.clone(), eval(bindings, val));
+                let val = eval(ctx, val);
+                ctx.bindings.insert(name.clone(), val);
             },
+            Statement::Write(lhs, rhs) => {
+                let lhs = eval(ctx, lhs);
+                if let Data::Binary { size: _, val: index } = lhs {
+                    let index = index as usize;
+                    let rhs = eval(ctx, rhs);
+                    if index < ctx.stack.len() {
+                        ctx.stack[index] = rhs;
+                    } else if index >= STACK_SIZE {
+                        let index = index - STACK_SIZE;
+                        if index > ctx.heap.len() || ctx.heap[index].is_none() {
+                            panic!("Invalid Heap Access: {}", index);
+                        }
+                        ctx.heap[index] = Some(rhs);
+                    } else {
+                        panic!("Invalid Stack Access: {}", index);
+                    }
+                } else {
+                    panic!("Tried to write to nonscalar value: {:?}", lhs);
+                }
+            },
+            Statement::Return(val) => return eval(ctx, val),
             _ => {
                 unimplemented!();
             },
         }
         pc += 1;
     }
+    Data::Binary { size: 0, val: 0 }
 }
 

@@ -1,5 +1,10 @@
 
 main := () {
-	x := 5;
+	x := auto *b64;
+	y := alloc b64;
+	x <- y;
+	y <- x;
+
+	return y;
 }
 

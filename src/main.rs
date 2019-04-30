@@ -1,7 +1,5 @@
 extern crate clean_lang;
 
-use std::collections::HashMap;
-
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -35,9 +33,9 @@ fn main() {
             }
         }
     }
-    let mut bindings = HashMap::new();
-    execute(&mut bindings, &program.expect("No main function defined"));
+    let mut ctx = clean_lang::Context::new();
+    let val = execute(&mut ctx, &program.expect("No main function defined"));
 
-    // println!("Result:\n  {:?}", result);
+    println!("Got result: {:?}", val);
 }
 
