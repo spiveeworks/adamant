@@ -1,10 +1,10 @@
 
 main := () {
-	x := auto *b64;
-	y := alloc b64;
-	x <- y;
+	x := alloc b64;
+	x <- 22;
+	y := auto *b64;
 	y <- x;
 
-	return y;
+	return **y;
 }
 

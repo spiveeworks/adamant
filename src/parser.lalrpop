@@ -30,19 +30,32 @@ Statement: Statement = {
     "while" <Expr> "{" <Statement*> "}" => Statement::While(<>),
 };
 
-Expr: Expr = {
+Expr = { ExprAdditive };
+
+ExprAdditive: Expr = {
+    // parse nested +s as the LHS so that execution is left to right
+    <ExprAdditive> "+" <ExprIndirection> => Expr::Plus(Box::new((<>))),
+    ExprIndirection,
+};
+
+ExprIndirection: Expr = {
     "auto" <TypeExpr> => Expr::AutoAlloc(<>),
     "alloc" <TypeExpr> => Expr::GenAlloc(<>),
-    // "*" <Expr> => Expr::Deref(Box::new(<>)),
+    "*" <ExprIndirection> => Expr::Deref(Box::new(<>)),
+    StructureExpr,
+};
+
+StructureExpr: Expr = {
     <Ident> => Expr::Ident(<>),
-    <data: Expr> "." <field: Ident> => Expr::Field(Box::new(data), field),
-    <Expr> "[" <Expr> "]" => Expr::Index(Box::new((<>))),
-    //<Expr> "+" <Expr> => Expr::Plus(Box::new((<>))),
+    <data: StructureExpr> "." <field: Ident> => Expr::Field(Box::new(data), field),
+    <StructureExpr> "[" <Expr> "]" => Expr::Index(Box::new((<>))),
     r"[0-9]*" => Expr::IntegerLiteral(<>.parse().unwrap()),
     "{" <vals: Comma<(<Ident> ":=" <Expr>)>> "}" =>
         Expr::StructLiteral(vals.into_iter().collect()),
     "[" <Comma<Expr>> "]" => Expr::ArrayLiteral(<>),
-    <f: Expr> "(" <args: Comma<Expr>> ")" => Expr::Call(Box::new(f), args),
+    <f: StructureExpr> "(" <args: Comma<Expr>> ")"
+        => Expr::Call(Box::new(f), args),
+    "(" <Expr> ")",
 };
 
 Ascription: (String, TypeExpr) = {

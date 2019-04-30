@@ -91,6 +91,35 @@ fn size_of(ctx: &mut Context, ty: &TypeExpr) -> Data {
 }
 */
 
+impl Data {
+    fn get_num(self: &Self) -> Option<u64> {
+        if let &Data::Binary { size: _, val } = self {
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
+impl Context {
+    fn get_mem(self: &mut Self, index: usize) -> &mut Data {
+        if index < self.stack.len() {
+            &mut self.stack[index]
+        } else if index < STACK_SIZE {
+            panic!("Invalid Stack Access: {}", index);
+        } else {
+            let index = index - STACK_SIZE;
+            if index > self.heap.len() || self.heap[index].is_none() {
+                panic!("Invalid Heap Access: {}", index);
+            } else {
+                self.heap[index]
+                    .as_mut()
+                    .unwrap()
+            }
+        }
+    }
+}
+
 fn eval(ctx: &mut Context, expr: &Expr) -> Data {
     match expr {
         Expr::AutoAlloc(_) => {
@@ -112,6 +141,12 @@ fn eval(ctx: &mut Context, expr: &Expr) -> Data {
             let val = (index + STACK_SIZE) as u64;
             Data::Binary { size: 64, val }
         },
+        Expr::Deref(val) => {
+            let val = eval(ctx, val);
+            let index = val.get_num()
+                .expect("Tried to dereference nonscalar");
+            ctx.get_mem(index as usize).clone()
+        },
         Expr::Ident(name) => ctx.bindings[name].clone(),
         &Expr::IntegerLiteral(val) => Data::Binary { size: 64, val },
         _ => unimplemented!(),
@@ -128,23 +163,10 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> Data {
             },
             Statement::Write(lhs, rhs) => {
                 let lhs = eval(ctx, lhs);
-                if let Data::Binary { size: _, val: index } = lhs {
-                    let index = index as usize;
-                    let rhs = eval(ctx, rhs);
-                    if index < ctx.stack.len() {
-                        ctx.stack[index] = rhs;
-                    } else if index >= STACK_SIZE {
-                        let index = index - STACK_SIZE;
-                        if index > ctx.heap.len() || ctx.heap[index].is_none() {
-                            panic!("Invalid Heap Access: {}", index);
-                        }
-                        ctx.heap[index] = Some(rhs);
-                    } else {
-                        panic!("Invalid Stack Access: {}", index);
-                    }
-                } else {
-                    panic!("Tried to write to nonscalar value: {:?}", lhs);
-                }
+                let index = lhs.get_num()
+                    .expect("Tried to write to nonscalar value");
+                let rhs = eval(ctx, rhs);
+                *ctx.get_mem(index as usize) = rhs;
             },
             Statement::Return(val) => return eval(ctx, val),
             _ => {
