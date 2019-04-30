@@ -25,6 +25,7 @@ pub enum TypeExpr {
     Array(Box<TypeExpr>, Box<Expr>),
     VarArray(Box<TypeExpr>),
     Ptr(Box<TypeExpr>),
+    Ident(String),
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +55,7 @@ pub enum Expr {
 pub enum Statement {
     Define(String, Expr),
     Write(Expr, Expr),
+    // at some point this should only do function calls, I think
     Discard(Expr),
     Return(Expr),
     While(Expr, Vec<Statement>),
@@ -148,8 +150,59 @@ fn eval(ctx: &mut Context, expr: &Expr) -> Data {
             ctx.get_mem(index as usize).clone()
         },
         Expr::Ident(name) => ctx.bindings[name].clone(),
+        Expr::Field(data, field) => {
+            let data = eval(ctx, data);
+            if let Data::Struct(mut vals) = data {
+                vals.remove(field).expect("Field does not exist")
+            } else {
+                panic!("Tried to take field of non-struct");
+            }
+        },
+        Expr::Index(data_and_index) => {
+            let (data, index) = &**data_and_index;
+            let data = eval(ctx, data);
+            if let Data::Array(mut data) = data {
+                let index = eval(ctx, index);
+                let index = index.get_num()
+                    .expect("Tried to index by non-scalar");
+                data.remove(index as usize)
+            } else {
+                panic!("Tried to index into non-array");
+            }
+        },
+        Expr::Plus(left_and_right) => {
+            let (left, right) = &**left_and_right;
+            let left = eval(ctx, left)
+                .get_num()
+                .expect("Tried to add non-number");
+            let right = eval(ctx, right)
+                .get_num()
+                .expect("Tried to add non-number");
+            Data::Binary { size: 64, val: left + right }
+        },
         &Expr::IntegerLiteral(val) => Data::Binary { size: 64, val },
-        _ => unimplemented!(),
+        Expr::StructLiteral(fields) => {
+            Data::Struct(
+                fields
+                    .iter()
+                    .map(|(name, val)| (
+                        name.clone(),
+                        eval(ctx, val)
+                    ))
+                    .collect()
+            )
+        },
+        Expr::ArrayLiteral(elems) => {
+            Data::Array(
+                elems
+                    .iter()
+                    .map(|val|eval(ctx, val))
+                    .collect()
+            )
+        },
+        Expr::Call(_fun, _args) => {
+            unimplemented!();
+        },
     }
 }
 
@@ -168,8 +221,12 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> Data {
                 let rhs = eval(ctx, rhs);
                 *ctx.get_mem(index as usize) = rhs;
             },
+            Statement::Discard(expr) => {
+                // how literal lol
+                eval(ctx, expr);
+            },
             Statement::Return(val) => return eval(ctx, val),
-            _ => {
+            Statement::While(_, _) => {
                 unimplemented!();
             },
         }

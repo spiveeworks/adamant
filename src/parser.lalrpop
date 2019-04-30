@@ -10,7 +10,7 @@ Item: Item = {
         "(" <params: Comma<Ascription>> ")" <ret: ("->" <TypeExpr>)?>
         "{" <body: Statement*> "}"
             => Item::Function(name, params, body),
-    <Ident> ":=" <TypeExpr> => Item::TypeDef(<>),
+    <Ident> ":=" <TypeExpr> ";" => Item::TypeDef(<>),
 };
 
 TypeExpr: TypeExpr = {
@@ -20,6 +20,7 @@ TypeExpr: TypeExpr = {
     "[" <inner: TypeExpr> "*" <size: Expr> "]" => TypeExpr::Array(Box::new(inner), Box::new(size)),
     "[" <inner: TypeExpr> "]" => TypeExpr::VarArray(Box::new(inner)),
     "*" <TypeExpr> => TypeExpr::Ptr(Box::new(<>)),
+    <Ident> => TypeExpr::Ident(<>),
 };
 
 Statement: Statement = {

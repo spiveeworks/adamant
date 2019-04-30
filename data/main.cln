@@ -16,7 +16,7 @@ list_len := (list: *ByteList) -> b64 {
 
 vec_from_list := (list: *ByteList) -> ByteVec {
 	count := list_len(list);
-	data := alloc [b8 x count];
+	data := alloc [b8 * count];
 	listptr := auto *ByteList;
 	listptr <- list;
 	i := auto b64;
@@ -60,8 +60,12 @@ alloc_list := (vals: ByteListC) -> *ByteList {
 }
 
 main := () {
-	text := auto [b8 x 12];
-	text <- ['H', 'e', 'l', 'l', 'o', 32, 'W', 'o', 'r', 'l', 'd', '!'];
-	output(text, 12);
+	text := auto [b64 * 10];
+	text <- [0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+	i := auto b64;
+	i <- 2;
+	while i < 10 {
+		text[i] <- text[i - 1] + text[i - 2];
+	}
 }
 
