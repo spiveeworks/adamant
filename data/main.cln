@@ -1,1 +1,67 @@
-Hello_World
+
+ByteVec := { capacity: b64, size: b64, data: *[b8] };
+ByteList := { head: b8, tail: *ByteList };
+
+list_len := (list: *ByteList) -> b64 {
+	listptr := auto *ByteList;
+	listptr <- list;
+	count := auto b64;
+	count <- 0;
+	while list {
+		count <- *count + 1;
+		list <- *listptr.tail;
+	}
+	return count;
+}
+
+vec_from_list := (list: *ByteList) -> ByteVec {
+	count := list_len(list);
+	data := alloc [b8 x count];
+	listptr := auto *ByteList;
+	listptr <- list;
+	i := auto b64;
+	i <- 0;
+	while listptr {
+		data[i] <- *listptr.head;
+		listptr <- *listptr.tail;
+		i <- i + 1;
+	}
+	return {
+		capacity := count,
+		size := count,
+		data := data as *[b8],
+	};
+}
+
+ByteListC := {
+	non_empty: b1,
+	data: union {
+		empty: b0,
+		cons: { head: b8, tail: ByteListC },
+	}
+}
+
+alloc_list := (vals: ByteListC) -> *ByteList {
+	result := auto *ByteList;
+	result <- NULL;
+	current := auto **ByteList;
+	current <- result;
+	valptr := auto ByteListC;
+	valptr <- vals;
+	while vals.non_empty {
+		cons := valptr.data.cons;
+		*current <- alloc ByteList;
+		current.head <- cons.head;
+		current.tail <- NULL;
+		current <- current.tail;
+		valptr <- cons.tail;
+	}
+	return *result;
+}
+
+main := () {
+	text := auto [b8 x 12];
+	text <- ['H', 'e', 'l', 'l', 'o', 32, 'W', 'o', 'r', 'l', 'd', '!'];
+	output(text, 12);
+}
+
