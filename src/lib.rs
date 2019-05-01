@@ -7,20 +7,21 @@ lalrpop_mod!(parser);
 
 pub use parser::ItemsParser;
 
-/*
-enum Type {
+#[derive(Clone, Debug)]
+pub enum Type {
     Binary { size: u8 },
     Struct { fields: Vec<(String, Type)> },
     Array { content: Box<Type>, number: usize },
-    Subtype { name: String, base: Box<Type> },
-    Backlink { order: u8 },
+    Pointer { base: Box<Type> },  // ideally a subtype of bsize/usize??
+    //Subtype { name: String, base: Box<Type> },
+    //Backlink { order: u8 },
+    Untyped,
 }
-*/
 
 //type FunId = usize;
 
 pub enum TypeExpr {
-    Bitset(u8),
+    Binary(u8),
     Struct(HashMap<String, TypeExpr>),
     Array(Box<TypeExpr>, Box<Expr>),
     VarArray(Box<TypeExpr>),
@@ -30,7 +31,7 @@ pub enum TypeExpr {
 
 #[derive(Clone, Debug)]
 pub enum Data {
-    Binary { size: u8, val: u64 },
+    Binary { size: u8, val: u64 }, // size? probably not necessary now that bindings are typed
     Array(Vec<Data>),
     Struct(HashMap<String, Data>),
     // Function { data: Box<Data>, body: FunId, },
@@ -68,7 +69,7 @@ pub enum Item {
 
 #[derive(Clone)]
 pub struct Context {
-    pub bindings: HashMap<String, Data>,
+    pub bindings: HashMap<String, (Type, Data)>,
     pub stack: Vec<Data>,
     pub heap: Vec<Option<Data>>,
 }
@@ -122,14 +123,73 @@ impl Context {
     }
 }
 
-fn eval(ctx: &mut Context, expr: &Expr) -> Data {
-    match expr {
-        Expr::AutoAlloc(_) => {
-            let val = ctx.stack.len() as u64;
-            ctx.stack.push(Data::Binary { size: 0, val: 0 });
-            Data::Binary { size: 64, val }
+fn eval_type(ctx: &mut Context, ty: &TypeExpr) -> (Type, Option<usize>) {
+    match ty {
+        &TypeExpr::Binary(size) => (Type::Binary { size }, Some(8)),
+        TypeExpr::Struct(fields) => {
+            let mut size = Some(0);
+            let mut field_tys = Vec::new();
+            for (name, ty) in fields {
+                let (ty, field_size) = eval_type(ctx, ty);
+                field_tys.push((name.clone(), ty));
+                size = size.and_then(|x|field_size.map(|y| x + y));
+            }
+            // padding? alignment?
+            (Type::Struct { fields: field_tys }, size)
         },
-        Expr::GenAlloc(_) => {
+        TypeExpr::Array(ty, n) => {
+            let (ty, size) = eval_type(ctx, ty);
+            let n = eval(ctx, n).1.get_num().expect("Array size must be scalar");
+            (Type::Array{ content: Box::new(ty), number: n as usize}, size.map(|x| x * n as usize))
+        },
+        TypeExpr::VarArray(ty) => {
+            let (ty, _) = eval_type(ctx, ty);
+            (unimplemented!(), None)
+        },
+        TypeExpr::Ptr(ty) => {
+            let (ty, _) = eval_type(ctx, ty);
+            (Type::Pointer { base: Box::new(ty) } , Some(8))
+        },
+        TypeExpr::Ident(_) => unimplemented!(),
+    }
+}
+
+fn fresh(ty: &Type) -> Data {
+    return Data::Binary { size: 0, val: 0 };
+    match ty {
+        Type::Binary { .. } => unimplemented!(),
+        Type::Struct { .. } => unimplemented!(),
+        Type::Array { .. } => unimplemented!(),
+        // Type::VarArray(_) => unimplemented!(),
+        Type::Pointer { .. } => unimplemented!(),
+        Type::Untyped => unimplemented!(),
+    }
+}
+
+fn lookup<'a, K: PartialEq, V>(data: &'a mut Vec<(K, V)>, key: &K) -> Option<&'a mut V> {
+    for (k, v) in data {
+        if k == key {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
+    match expr {
+        Expr::AutoAlloc(ty) => {
+            let (base_ty, size) = eval_type(ctx, ty);
+            let ty = Type::Pointer { base: Box::new(base_ty) };
+
+            let val = ctx.stack.len() as u64;
+            ctx.stack.push(fresh(&ty));
+
+            (ty, Data::Binary { size: 64, val })
+        },
+        Expr::GenAlloc(ty) => {
+            let (base_ty, size) = eval_type(ctx, ty);
+            let ty = Type::Pointer { base: Box::new(base_ty) };
+
             let mut index = 0;
             while index < ctx.heap.len() && ctx.heap[index].is_some() {
                 index += 1;
@@ -141,64 +201,89 @@ fn eval(ctx: &mut Context, expr: &Expr) -> Data {
                 ctx.heap.push(content);
             }
             let val = (index + STACK_SIZE) as u64;
-            Data::Binary { size: 64, val }
+
+            (ty, Data::Binary { size: 64, val })
         },
         Expr::Deref(val) => {
-            let val = eval(ctx, val);
+            let (ty, val) = eval(ctx, val);
+            let ty = if let Type::Pointer { base } = ty { *base } else {
+                panic!("Tried to dereference non-scalar");
+            };
             let index = val.get_num()
-                .expect("Tried to dereference nonscalar");
-            ctx.get_mem(index as usize).clone()
+                .expect("Pointer binding was non-scalar?");
+            (ty, ctx.get_mem(index as usize).clone())
         },
         Expr::Ident(name) => ctx.bindings[name].clone(),
         Expr::Field(data, field) => {
-            let data = eval(ctx, data);
-            if let Data::Struct(mut vals) = data {
-                vals.remove(field).expect("Field does not exist")
+            let (data_ty, data) = eval(ctx, data);
+            let field_ty = if let Type::Struct { fields: mut field_tys } = data_ty {
+                lookup(&mut field_tys, field)
+                    .expect("Struct does not contain this field")
+                    .clone()
             } else {
-                panic!("Tried to take field of non-struct");
+                panic!("Tried to access field of non-struct");
+            };
+            if let Data::Struct(mut vals) = data {
+                (field_ty, vals.remove(field).expect("Field does not exist"))
+            } else {
+                panic!("Struct binding wasn't a struct?");
             }
         },
         Expr::Index(data_and_index) => {
             let (data, index) = &**data_and_index;
-            let data = eval(ctx, data);
+            let (ty, data) = eval(ctx, data);
+            let (ty, number) = if let Type::Array { content, number } = ty {
+                (*content, number)
+            } else {
+                panic!("Tried to index non-array");
+            };
             if let Data::Array(mut data) = data {
-                let index = eval(ctx, index);
+                let (_, index) = eval(ctx, index);
+                // check that we arent indexing with a pointer?
                 let index = index.get_num()
                     .expect("Tried to index by non-scalar");
-                data.remove(index as usize)
+                (ty, data.remove(index as usize))
             } else {
-                panic!("Tried to index into non-array");
+                panic!("Array binding wasn't an array?");
             }
         },
         Expr::Plus(left_and_right) => {
             let (left, right) = &**left_and_right;
-            let left = eval(ctx, left)
+            let left = eval(ctx, left).1
                 .get_num()
                 .expect("Tried to add non-number");
-            let right = eval(ctx, right)
+            let right = eval(ctx, right).1
                 .get_num()
                 .expect("Tried to add non-number");
-            Data::Binary { size: 64, val: left + right }
+            (Type::Binary { size: 64 }, Data::Binary { size: 64, val: left + right })
         },
-        &Expr::IntegerLiteral(val) => Data::Binary { size: 64, val },
+        &Expr::IntegerLiteral(val) => (Type::Binary { size: 64}, Data::Binary { size: 64, val }),
         Expr::StructLiteral(fields) => {
-            Data::Struct(
-                fields
-                    .iter()
-                    .map(|(name, val)| (
-                        name.clone(),
-                        eval(ctx, val)
-                    ))
-                    .collect()
-            )
+            let mut tys = Vec::new();
+            let mut vals = HashMap::new();
+            for (name, val) in fields {
+                let (ty, val) = eval(ctx, val);
+                tys.push((name.clone(), ty));
+                vals.insert(name.clone(), val);
+            }
+            (Type::Struct { fields: tys }, Data::Struct(vals))
         },
         Expr::ArrayLiteral(elems) => {
-            Data::Array(
-                elems
-                    .iter()
-                    .map(|val|eval(ctx, val))
-                    .collect()
-            )
+            let size = elems.len();
+            let mut first_ty = None;
+            let mut vals = Vec::with_capacity(size);
+
+            for val in elems {
+                let (ty, val) = eval(ctx, val);
+                if first_ty.is_none() {
+                    first_ty = Some(ty);
+                }
+                // if first_ty != Some(ty) { untyped stuff }
+                vals.push(val);
+            }
+
+            let ty = first_ty.unwrap_or(Type::Binary { size: 0 });
+            (Type::Array { content: Box::new(ty), number: size }, Data::Array(vals))
         },
         Expr::Call(_fun, _args) => {
             unimplemented!();
@@ -206,7 +291,7 @@ fn eval(ctx: &mut Context, expr: &Expr) -> Data {
     }
 }
 
-pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> Data {
+pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
     let mut pc = 0;
     while pc < program.len() {
         match &program[pc] {
@@ -215,10 +300,10 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> Data {
                 ctx.bindings.insert(name.clone(), val);
             },
             Statement::Write(lhs, rhs) => {
-                let lhs = eval(ctx, lhs);
+                let (lhs_type, lhs) = eval(ctx, lhs);
                 let index = lhs.get_num()
                     .expect("Tried to write to nonscalar value");
-                let rhs = eval(ctx, rhs);
+                let (rhs_type, rhs) = eval(ctx, rhs);
                 *ctx.get_mem(index as usize) = rhs;
             },
             Statement::Discard(expr) => {
@@ -232,6 +317,6 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> Data {
         }
         pc += 1;
     }
-    Data::Binary { size: 0, val: 0 }
+    (Type::Binary { size: 0 }, Data::Binary { size: 0, val: 0 })
 }
 
