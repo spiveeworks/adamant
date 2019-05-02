@@ -80,8 +80,9 @@ pub enum Item {
 #[derive(Clone)]
 pub struct Context {
     pub bindings: HashMap<String, (Type, Data)>,
-    pub stack: Vec<Data>,
-    pub heap: Vec<Option<Data>>,
+    // make this bottom heap? that is already how we adress it at the moment
+    pub stack: Vec<u8>,
+    pub heap: Vec<Vec<u8>>,
 }
 
 impl Context {
@@ -115,20 +116,16 @@ impl Data {
 }
 
 impl Context {
-    fn get_mem(self: &mut Self, index: usize) -> &mut Data {
+    fn get_mem(self: &mut Self, index: usize) -> &mut [u8] {
         if index < self.stack.len() {
-            &mut self.stack[index]
+            self.stack.split_at_mut(index).1
         } else if index < STACK_SIZE {
             panic!("Invalid Stack Access: {}", index);
         } else {
             let index = index - STACK_SIZE;
-            if index > self.heap.len() || self.heap[index].is_none() {
-                panic!("Invalid Heap Access: {}", index);
-            } else {
-                self.heap[index]
-                    .as_mut()
-                    .unwrap()
-            }
+            let slab = index / STACK_SIZE;
+            let local = index % STACK_SIZE;
+            self.heap[slab].split_at_mut(local).1
         }
     }
 }
@@ -233,28 +230,35 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
     match expr {
         Expr::AutoAlloc(ty) => {
             let base_ty = eval_type(ctx, ty);
+            let size = base_ty.size.expect("Cannot allocate unsized type");
             let ty = pointer_type(base_ty);
 
-            let val = ctx.stack.len() as u64;
-            ctx.stack.push(fresh(&ty));
+            let len = ctx.stack.len();
+            ctx.stack.resize(len + size, 0xD1);
 
-            (ty, Data::Binary { size: 64, val })
+            (ty, Data::Binary { size: 64, val: len as u64 })
         },
         Expr::GenAlloc(ty) => {
             let base_ty = eval_type(ctx, ty);
+            let size = base_ty.size.expect("Cannot allocate unsized type");
             let ty = pointer_type(base_ty);
 
-            let mut index = 0;
-            while index < ctx.heap.len() && ctx.heap[index].is_some() {
-                index += 1;
+            if size == 0 {
+                // not exactly a null pointer since the stack starts at zero in this interpretor...
+                return (ty, Data::Binary { size: 64, val: 0 })
             }
-            let content = Some(Data::Binary { size: 0, val: 0 });
-            if ctx.heap.len() < index {
-                ctx.heap[index] = content;
+            let mut slab = 0;
+            while slab < ctx.heap.len() && ctx.heap[slab].len() != 0 {
+                slab += 1;
+            }
+            let mut slab_data = Vec::new();
+            slab_data.resize(size, 0xD1);
+            if slab < ctx.heap.len() {
+                ctx.heap[slab] = slab_data;
             } else {
-                ctx.heap.push(content);
+                ctx.heap.push(slab_data);
             }
-            let val = (index + STACK_SIZE) as u64;
+            let val = (slab * STACK_SIZE + STACK_SIZE) as u64;
 
             (ty, Data::Binary { size: 64, val })
         },
@@ -263,7 +267,8 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
             let ty = deref_type(ty).expect("Tried to dereference non-scalar");
             let index = val.get_num()
                 .expect("Pointer binding was non-scalar?");
-            (ty, ctx.get_mem(index as usize).clone())
+            let data = read(ctx.get_mem(index as usize), &ty);
+            (ty, data)
         },
         Expr::Ident(name) => ctx.bindings[name].clone(),
         Expr::Field(data, field) => {
@@ -346,6 +351,98 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
     }
 }
 
+fn write(out: &mut [u8], ty: &Type, data: Data) {
+    let size = ty.size.expect("Tried to write unsized value to memory");
+    if size == 0 {
+        return;
+    }
+    match data {
+        Data::Binary { val, .. } => {
+            if size == 8 {
+                unsafe {
+                    let valbytes: [u8; 8] = std::mem::transmute(val);
+                    for i in 0..8 {
+                        out[i] = valbytes[i];
+                    }
+                }
+            } else {
+                unimplemented!();
+            }
+        },
+        Data::Array(elems) => {
+            if let TypeLayout::Array { content, .. } = &ty.layout {
+                let chunk_size = content.size
+                    .expect("Tried to write array of unsized values to memory");
+                for (chunk, elem) in out.chunks_mut(chunk_size).zip(elems) {
+                    write(chunk, content, elem);
+                }
+            }
+        },
+        Data::Struct(mut fields) => {
+            let mut remain = out;
+            if let TypeLayout::Struct { fields: field_tys } = &ty.layout {
+                for (name, ty) in field_tys {
+                    let field = fields.remove(name)
+                        .expect("Missing field in struct memory write");
+
+                    let size = ty.size.expect("Cannot write unsized field to memory");
+                    let (left, right) = remain.split_at_mut(size);
+                    remain = right;
+                    write(left, ty, field);
+                }
+                assert!(fields.len() == 0, "Struct write has too many fields");
+            }
+        },
+    }
+}
+
+fn read_u64(data: &[u8]) -> u64 {
+    let mut out = [0; 8];
+    for i in 0..8 {
+        out[i] = data[i];
+    }
+    unsafe {
+        std::mem::transmute(out)
+    }
+}
+
+fn read(data: &[u8], ty: &Type) -> Data {
+    match &ty.layout {
+        TypeLayout::Binary { size } => {
+            if *size == 0 {
+                Data::Binary { size: 0, val: 0 }
+            } else if *size == 8 {
+                Data::Binary { size: 8, val: read_u64(data) }
+            } else {
+                unimplemented!();
+            }
+        },
+        TypeLayout::Pointer { .. } => Data::Binary { size: 8, val: read_u64(data) },
+        TypeLayout::Struct { fields: field_tys } => {
+            let mut fields = HashMap::new();
+            let mut remain = data;
+            for (name, field_ty) in field_tys {
+                let size = field_ty.size.expect("Cannot read unsized struct");
+                let (left, right) = remain.split_at(size);
+                remain = right;
+                fields.insert(name.clone(), read(left, field_ty));
+            }
+            Data::Struct(fields)
+        },
+        TypeLayout::Array { content, number } => {
+            let mut elems = Vec::new();
+            let size = content.size.expect("Cannot read array of unsized");
+            for chunk in data.chunks(size).take(*number) {
+                elems.push(read(chunk, content));
+            }
+            Data::Array(elems)
+        },
+        TypeLayout::Untyped => {
+            panic!("Cannot read pointer to untyped?");
+        },
+    }
+}
+
 pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
     let mut pc = 0;
     while pc < program.len() {
@@ -356,10 +453,12 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
             },
             Statement::Write(lhs, rhs) => {
                 let (lhs_type, lhs) = eval(ctx, lhs);
+                let referant_type = deref_type(lhs_type)
+                    .expect("Cannot write to non-pointer");
                 let index = lhs.get_num()
-                    .expect("Tried to write to nonscalar value");
+                    .expect("Tried to write to nonscalar value?");
                 let (rhs_type, rhs) = eval(ctx, rhs);
-                *ctx.get_mem(index as usize) = rhs;
+                write(ctx.get_mem(index as usize), &referant_type, rhs);
             },
             Statement::Discard(expr) => {
                 // how literal lol

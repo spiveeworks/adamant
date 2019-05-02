@@ -2,9 +2,7 @@
 main := () {
 	x := alloc b64;
 	x <- 22;
-	y := auto *b64;
-	y <- x;
 
-	return **y;
+	return *x;
 }
 
