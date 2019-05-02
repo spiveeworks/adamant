@@ -1,0 +1,42 @@
+
+main := () {
+	to_calc := 10;
+	text := auto [b64 * to_calc + 2];
+	text[0] <- 0;
+	text[1] <- 1;
+
+	i := auto b64;
+	i <- 0;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+		text[*i + 2] <- *text[*i] + *text[*i+1];
+		i <- *i + 1;
+
+	return *text;
+}

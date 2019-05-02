@@ -132,7 +132,7 @@ impl Context {
 
 fn struct_type(field_tys: Vec<(String, Type)>) -> Type {
     let mut size = Some(0);
-    for (name, ty) in &field_tys {
+    for (_name, ty) in &field_tys {
         size = size.and_then(|x|ty.size.map(|y| x + y));
     }
     // padding? alignment?
@@ -226,6 +226,20 @@ fn eval_num(val: u64) -> (Type, Data) {
     )
 }
 
+fn get_last_ptr(ctx: &mut Context, mut ty: Type, mut data: Data) -> (usize, Type, Data) {
+    let mut layers = 0;
+    while let TypeLayout::Pointer { base } = ty.layout {
+        layers += 1;
+        ty = *base;
+        // condition here so that reads lag behind type stripping
+        if layers > 1 {
+            let index = data.get_num().expect("Pointer was nonscalar?");
+            data = read(ctx.get_mem(index as usize), &ty);
+        }
+    }
+    (layers, ty, data)
+}
+
 fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
     match expr {
         Expr::AutoAlloc(ty) => {
@@ -272,38 +286,68 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
         },
         Expr::Ident(name) => ctx.bindings[name].clone(),
         Expr::Field(data, field) => {
-            let (data_ty, data) = eval(ctx, data);
-            let field_ty = {
-                if let TypeLayout::Struct { fields: mut field_tys } = data_ty.layout {
-                    lookup(&mut field_tys, field)
-                        .expect("Struct does not contain this field")
-                        .clone()
+            let (ptr_ty, data) = eval(ctx, data);
+            let (layers, ty, data) = get_last_ptr(ctx, ptr_ty, data);
+            // mut so that i can use a more generally defined method....
+            let mut field_tys = {
+                if let TypeLayout::Struct { fields: field_tys } = ty.layout {
+                    field_tys
                 } else {
                     panic!("Tried to access field of non-struct");
                 }
             };
-            if let Data::Struct(mut vals) = data {
-                (field_ty, vals.remove(field).expect("Field does not exist"))
+            if layers == 0 {
+                if let Data::Struct(mut vals) = data {
+                    let field_ty = lookup(&mut field_tys, field)
+                        .expect("Struct does not contain this field")
+                        .clone();
+                    (field_ty, vals.remove(field).expect("Field does not exist"))
+                } else {
+                    panic!("Struct binding wasn't a struct?");
+                }
             } else {
-                panic!("Struct binding wasn't a struct?");
+                let mut val = data.get_num()
+                    .expect("get_last_ptr gave nonscalar?") as usize;
+                for (this_name, this_ty) in field_tys {
+                    if this_name == *field {
+                        let ty = pointer_type(this_ty);
+                        let ptr = Data::Binary { bits: 64, val: val as u64 };
+                        return (ty, ptr);
+                    } else {
+                        val += this_ty.size
+                            .expect("Can't reference fields past an unsized field");
+                    }
+                }
+                panic!("Tried to reference non-existant field of struct");
             }
         },
         Expr::Index(data_and_index) => {
             let (data, index) = &**data_and_index;
-            let (ty, data) = eval(ctx, data);
-            let (ty, number) = if let TypeLayout::Array { content, number } = ty.layout {
+            let (ptr_ty, data) = eval(ctx, data);
+            let (layers, ty, data) = get_last_ptr(ctx, ptr_ty, data);
+            let (content_ty, number) = if let TypeLayout::Array { content, number } = ty.layout {
                 (*content, number)
             } else {
                 panic!("Tried to index non-array");
             };
-            if let Data::Array(mut data) = data {
-                let (_, index) = eval(ctx, index);
-                // check that we arent indexing with a pointer?
-                let index = index.get_num()
-                    .expect("Tried to index by non-scalar");
-                (ty, data.remove(index as usize))
+            let (_, index) = eval(ctx, index);
+            // check that we arent indexing with a pointer?
+            let index = index.get_num()
+                .expect("Tried to index by non-scalar");
+            if layers == 0 {
+                if let Data::Array(mut data) = data {
+                    (content_ty, data.remove(index as usize))
+                } else {
+                    panic!("Array binding wasn't an array?");
+                }
             } else {
-                panic!("Array binding wasn't an array?");
+                let start = data.get_num()
+                    .expect("get_last_ptr gave nonscalar?");
+                let offset = index * content_ty.size
+                    .expect("Can't reference fields past an unsized field") as u64;
+                let ty = pointer_type(content_ty);
+                let ptr = Data::Binary { bits: 64, val: start + offset };
+                return (ty, ptr);
             }
         },
         Expr::Plus(left_and_right) => {

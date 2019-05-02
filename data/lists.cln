@@ -59,13 +59,3 @@ alloc_list := (vals: ByteListC) -> *ByteList {
 	return *result;
 }
 
-main := () {
-	text := auto [b64 * 10];
-	text <- [0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-	i := auto b64;
-	i <- 2;
-	while i < 10 {
-		text[i] <- text[i - 1] + text[i - 2];
-	}
-}
-

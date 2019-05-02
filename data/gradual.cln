@@ -1,8 +1,10 @@
 
 main := () {
-	x := alloc b64;
-	x <- 22;
+	v := alloc {x: b64, y: b64};
+	v <- { x := 0, y := 0 };
+	v.x <- 5;
+	v.y <- *v.x + 10;
 
-	return *x;
+	return *v;
 }
 
