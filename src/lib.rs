@@ -19,7 +19,7 @@ pub type TypeBox = Box<Type>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeLayout {
-    Binary { size: u8 },
+    Binary { bits: u8 },
     Struct { fields: Vec<(String, Type)> },
     Array { content: TypeBox, number: usize },
     Pointer { base: TypeBox },  // ideally a subtype of bsize/usize??
@@ -31,7 +31,7 @@ pub enum TypeLayout {
 //type FunId = usize;
 
 pub enum TypeExpr {
-    Binary(u8),
+    Binary { bits: u8 },
     Struct(HashMap<String, TypeExpr>),
     Array(Box<TypeExpr>, Box<Expr>),
     VarArray(Box<TypeExpr>),
@@ -41,7 +41,7 @@ pub enum TypeExpr {
 
 #[derive(Clone, Debug)]
 pub enum Data {
-    Binary { size: u8, val: u64 }, // size? probably not necessary now that bindings are typed
+    Binary { bits: u8, val: u64 }, // size? probably not necessary now that bindings are typed
     Array(Vec<Data>),
     Struct(HashMap<String, Data>),
     // Function { data: Box<Data>, body: FunId, },
@@ -107,7 +107,7 @@ fn size_of(ctx: &mut Context, ty: &TypeExpr) -> Data {
 
 impl Data {
     fn get_num(self: &Self) -> Option<u64> {
-        if let &Data::Binary { size: _, val } = self {
+        if let &Data::Binary { bits: _, val } = self {
             Some(val)
         } else {
             None
@@ -168,9 +168,9 @@ fn deref_type(ty: Type) -> Option<Type> {
 
 fn eval_type(ctx: &mut Context, ty: &TypeExpr) -> Type {
     match ty {
-        &TypeExpr::Binary(size) => Type {
+        &TypeExpr::Binary { bits } => Type {
             size: Some(8),
-            layout: TypeLayout::Binary { size }
+            layout: TypeLayout::Binary { bits }
         },
         TypeExpr::Struct(fields) => struct_type(
             fields
@@ -199,7 +199,7 @@ fn eval_type(ctx: &mut Context, ty: &TypeExpr) -> Type {
 }
 
 fn fresh(ty: &Type) -> Data {
-    return Data::Binary { size: 0, val: 0 };
+    return Data::Binary { bits: 0, val: 0 };
     match ty.layout {
         TypeLayout::Binary { .. } => unimplemented!(),
         TypeLayout::Struct { .. } => unimplemented!(),
@@ -221,8 +221,8 @@ fn lookup<'a, K: PartialEq, V>(data: &'a mut Vec<(K, V)>, key: &K) -> Option<&'a
 
 fn eval_num(val: u64) -> (Type, Data) {
     (
-        Type { size: Some(8), layout: TypeLayout::Binary { size: 64 } },
-        Data::Binary { size: 64, val },
+        Type { size: Some(8), layout: TypeLayout::Binary { bits: 64 } },
+        Data::Binary { bits: 64, val },
     )
 }
 
@@ -236,7 +236,7 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
             let len = ctx.stack.len();
             ctx.stack.resize(len + size, 0xD1);
 
-            (ty, Data::Binary { size: 64, val: len as u64 })
+            (ty, Data::Binary { bits: 64, val: len as u64 })
         },
         Expr::GenAlloc(ty) => {
             let base_ty = eval_type(ctx, ty);
@@ -245,7 +245,7 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
 
             if size == 0 {
                 // not exactly a null pointer since the stack starts at zero in this interpretor...
-                return (ty, Data::Binary { size: 64, val: 0 })
+                return (ty, Data::Binary { bits: 64, val: 0 })
             }
             let mut slab = 0;
             while slab < ctx.heap.len() && ctx.heap[slab].len() != 0 {
@@ -260,7 +260,7 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
             }
             let val = (slab * STACK_SIZE + STACK_SIZE) as u64;
 
-            (ty, Data::Binary { size: 64, val })
+            (ty, Data::Binary { bits: 64, val })
         },
         Expr::Deref(val) => {
             let (ty, val) = eval(ctx, val);
@@ -342,7 +342,7 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
                 vals.push(val);
             }
 
-            let ty = first_ty.unwrap_or(Type { size: Some(0), layout: TypeLayout::Binary { size: 0 } });
+            let ty = first_ty.unwrap_or(Type { size: Some(0), layout: TypeLayout::Binary { bits: 0 } });
             (array_type(ty, size), Data::Array(vals))
         },
         Expr::Call(_fun, _args) => {
@@ -408,16 +408,16 @@ fn read_u64(data: &[u8]) -> u64 {
 
 fn read(data: &[u8], ty: &Type) -> Data {
     match &ty.layout {
-        TypeLayout::Binary { size } => {
-            if *size == 0 {
-                Data::Binary { size: 0, val: 0 }
-            } else if *size == 8 {
-                Data::Binary { size: 8, val: read_u64(data) }
+        TypeLayout::Binary { bits } => {
+            if *bits == 0 {
+                Data::Binary { bits: 0, val: 0 }
+            } else if *bits == 64 {
+                Data::Binary { bits: 64, val: read_u64(data) }
             } else {
                 unimplemented!();
             }
         },
-        TypeLayout::Pointer { .. } => Data::Binary { size: 8, val: read_u64(data) },
+        TypeLayout::Pointer { .. } => Data::Binary { bits: 8, val: read_u64(data) },
         TypeLayout::Struct { fields: field_tys } => {
             let mut fields = HashMap::new();
             let mut remain = data;
@@ -471,6 +471,6 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
         }
         pc += 1;
     }
-    (Type { size: Some(0), layout: TypeLayout::Binary { size: 0 }}, Data::Binary { size: 0, val: 0 })
+    (Type { size: Some(0), layout: TypeLayout::Binary { bits: 0 }}, Data::Binary { bits: 0, val: 0 })
 }
 

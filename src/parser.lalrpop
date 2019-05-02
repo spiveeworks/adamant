@@ -14,8 +14,8 @@ Item: Item = {
 };
 
 TypeExpr: TypeExpr = {
-    "b8" => TypeExpr::Binary(8),
-    "b64" => TypeExpr::Binary(64),
+    "b8" => TypeExpr::Binary { bits: 8 },
+    "b64" => TypeExpr::Binary { bits: 64 },
     "{" <fields: Comma<Ascription>> "}" => TypeExpr::Struct(fields.into_iter().collect()),
     "[" <inner: TypeExpr> "*" <size: Expr> "]" => TypeExpr::Array(Box::new(inner), Box::new(size)),
     "[" <inner: TypeExpr> "]" => TypeExpr::VarArray(Box::new(inner)),
