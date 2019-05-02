@@ -7,7 +7,7 @@ lalrpop_mod!(parser);
 
 pub use parser::ItemsParser;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Type {
     size: Option<usize>,
     layout: TypeLayout,
@@ -17,7 +17,7 @@ pub struct Type {
 // probably won't lol
 pub type TypeBox = Box<Type>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TypeLayout {
     Binary { size: u8 },
     Struct { fields: Vec<(String, Type)> },
@@ -331,8 +331,9 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
                 let (ty, val) = eval(ctx, val);
                 if first_ty.is_none() {
                     first_ty = Some(ty);
+                } else if first_ty != Some(ty) {
+                    first_ty = Some(Type { size: None, layout: TypeLayout::Untyped } );
                 }
-                // if first_ty != Some(ty) { untyped stuff }
                 vals.push(val);
             }
 
