@@ -1,4 +1,6 @@
-extern crate clean_lang;
+extern crate lvalue_free_prototype;
+
+use lvalue_free_prototype as clean_lang;
 
 use std::fs::File;
 use std::io::prelude::*;

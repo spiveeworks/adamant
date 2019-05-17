@@ -1,5 +1,5 @@
 [package]
-name = "clean-lang"
+name = "lvalue-free-prototype"
 version = "0.1.0"
 authors = ["SpiveeWorks <spiveehere@gmail.com>"]
 edition = "2018"
