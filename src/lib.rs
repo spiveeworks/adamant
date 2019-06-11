@@ -57,6 +57,8 @@ pub enum Expr {
     Field(Box<Expr>, String),
     Index(Box<(Expr, Expr)>),
     Plus(Box<(Expr, Expr)>),
+    Minus(Box<(Expr, Expr)>),
+    LessThan(Box<(Expr, Expr)>),
     IntegerLiteral(u64),
     StructLiteral(HashMap<String, Expr>),
     ArrayLiteral(Vec<Expr>),
@@ -92,6 +94,17 @@ impl Context {
             stack: Vec::new(),
             heap: Vec::new(),
         }
+    }
+
+    pub fn push_ctx(self: &mut Self) -> (usize, HashMap<String, (Type, Data)>) {
+        let len = self.stack.len();
+        let bindings = std::mem::replace(&mut self.bindings, HashMap::new());
+        (len, bindings)
+    }
+
+    pub fn pop_ctx(self: &mut Self, len: usize, bindings: HashMap<String, (Type, Data)>) {
+        self.stack.resize(len, 0xD1);
+        self.bindings = bindings;
     }
 }
 
@@ -223,6 +236,13 @@ fn eval_num(val: u64) -> (Type, Data) {
     (
         Type { size: Some(8), layout: TypeLayout::Binary { bits: 64 } },
         Data::Binary { bits: 64, val },
+    )
+}
+
+fn eval_bool(val: bool) -> (Type, Data) {
+    (
+        Type { size: Some(8), layout: TypeLayout::Binary { bits: 1 } },
+        Data::Binary { bits: 64, val: val as u64 },
     )
 }
 
@@ -359,6 +379,26 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
                 .get_num()
                 .expect("Tried to add non-number");
             eval_num(left + right)
+        },
+        Expr::Minus(left_and_right) => {
+            let (left, right) = &**left_and_right;
+            let left = eval(ctx, left).1
+                .get_num()
+                .expect("Tried to subtract non-number");
+            let right = eval(ctx, right).1
+                .get_num()
+                .expect("Tried to subtract non-number");
+            eval_num(left - right)
+        },
+        Expr::LessThan(left_and_right) => {
+            let (left, right) = &**left_and_right;
+            let left = eval(ctx, left).1
+                .get_num()
+                .expect("Tried to subtract non-number");
+            let right = eval(ctx, right).1
+                .get_num()
+                .expect("Tried to subtract non-number");
+            eval_bool(left < right)
         },
         &Expr::IntegerLiteral(val) => eval_num(val),
         Expr::StructLiteral(fields) => {
@@ -509,12 +549,27 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
                 eval(ctx, expr);
             },
             Statement::Return(val) => return eval(ctx, val),
-            Statement::While(_, _) => {
-                unimplemented!();
+            Statement::While(cond, body) => {
+                while {
+                    let (cond_type, cond) = eval(ctx, cond);
+                    let cond = cond
+                        .get_num()
+                        .expect("Tried to condition nonscalar value");
+                    cond != 0
+                } {
+                    let (stack_len, bindings) = ctx.push_ctx();
+                    // @Performance
+                    ctx.bindings = bindings.clone();
+                    execute(ctx, body);
+                    ctx.pop_ctx(stack_len, bindings);
+                }
             },
         }
         pc += 1;
     }
-    (Type { size: Some(0), layout: TypeLayout::Binary { bits: 0 }}, Data::Binary { bits: 0, val: 0 })
+    (
+        Type { size: Some(0), layout: TypeLayout::Binary { bits: 0 }},
+        Data::Binary { bits: 0, val: 0 }
+    )
 }
 

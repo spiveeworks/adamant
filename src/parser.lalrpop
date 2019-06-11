@@ -31,11 +31,19 @@ Statement: Statement = {
     "while" <Expr> "{" <Statement*> "}" => Statement::While(<>),
 };
 
-Expr = { ExprAdditive };
+Expr = { ExprComparative };
+
+ExprComparative: Expr = {
+    <ExprAdditive> "<" <ExprAdditive> => Expr::LessThan(Box::new((<>))),
+    ExprAdditive,
+};
 
 ExprAdditive: Expr = {
     // parse nested +s as the LHS so that execution is left to right
     <ExprAdditive> "+" <ExprIndirection> => Expr::Plus(Box::new((<>))),
+    // also means a - b - c = (a - b) - c
+    // instead of a - (b - c) which is actually a - b + c
+    <ExprAdditive> "-" <ExprIndirection> => Expr::Minus(Box::new((<>))),
     ExprIndirection,
 };
 
