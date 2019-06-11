@@ -22,6 +22,7 @@ pub enum TypeLayout {
     Binary { bits: u8 },
     Struct { fields: Vec<(String, Type)> },
     Array { content: TypeBox, number: usize },
+    Function { params: Vec<(String, Type)>, /*result*/ },
     Pointer { base: TypeBox },  // ideally a subtype of bsize/usize??
     //Subtype { name: String, base: Box<Type> },
     //Backlink { order: u8 },
@@ -30,6 +31,7 @@ pub enum TypeLayout {
 
 //type FunId = usize;
 
+#[derive(Clone)]
 pub enum TypeExpr {
     Binary { bits: u8 },
     Struct(HashMap<String, TypeExpr>),
@@ -44,9 +46,10 @@ pub enum Data {
     Binary { bits: u8, val: u64 }, // size? probably not necessary now that bindings are typed
     Array(Vec<Data>),
     Struct(HashMap<String, Data>),
-    // Function { data: Box<Data>, body: FunId, },
+    Function(String),
 }
 
+#[derive(Clone)]
 pub enum Expr {
     AutoAlloc(TypeExpr),
     GenAlloc(TypeExpr),
@@ -65,6 +68,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
 }
 
+#[derive(Clone)]
 pub enum Statement {
     Define(String, Expr),
     Write(Expr, Expr),
@@ -74,22 +78,44 @@ pub enum Statement {
     While(Expr, Vec<Statement>),
 }
 
+#[derive(Clone)]
+pub struct Function {
+    params: Vec<(String, TypeExpr)>,
+    algorithm: Vec<Statement>,
+}
+
+#[derive(Clone)]
 pub enum Item {
     TypeDef(String, TypeExpr),
-    Function(String, Vec<(String, TypeExpr)>, Vec<Statement>),
+    Function(String, Function),
 }
 
 #[derive(Clone)]
 pub struct Context {
+    pub funs: &'static HashMap<String, Function>,
     pub bindings: HashMap<String, (Type, Data)>,
     // make this bottom heap? that is already how we adress it at the moment
     pub stack: Vec<u8>,
     pub heap: Vec<Vec<u8>>,
 }
 
+fn leak_global<T: 'static>(val: T) -> &'static T {
+    let as_box = Box::new(val);
+    let as_raw = Box::into_raw(as_box);
+    unsafe { &*as_raw }
+}
+
 impl Context {
-    pub fn new() -> Self {
+    pub fn new(items: Vec<Item>) -> Self {
+        let mut funs = HashMap::new();
+        for x in items {
+            if let Item::Function(name, fun) = x {
+                funs.insert(name, fun);
+            }
+        }
+        
         Context {
+            funs: leak_global(funs),
             bindings: HashMap::new(),
             stack: Vec::new(),
             heap: Vec::new(),
@@ -218,6 +244,7 @@ fn fresh(ty: &Type) -> Data {
         TypeLayout::Struct { .. } => unimplemented!(),
         TypeLayout::Array { .. } => unimplemented!(),
         // TypeLayout::VarArray(_) => unimplemented!(),
+        TypeLayout::Function { .. } => unimplemented!(),
         TypeLayout::Pointer { .. } => unimplemented!(),
         TypeLayout::Untyped => unimplemented!(),
     }
@@ -304,7 +331,23 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
             let data = read(ctx.get_mem(index as usize), &ty);
             (ty, data)
         },
-        Expr::Ident(name) => ctx.bindings[name].clone(),
+        Expr::Ident(name) => {
+            if let Some(val) = ctx.bindings.get(name) {
+                val.clone()
+            } else {
+                /*let params = ctx
+                    .funs[name]
+                    .params
+                    .iter()
+                    .map(|(param_name, ty)| (param_name.clone(), eval_type(ctx, ty)))
+                    .collect();*/
+                let ty = Type {
+                    size: None,
+                    layout: TypeLayout::Function { params: Vec::new() }
+                };
+                (ty, Data::Function(name.clone()))
+            }
+        }
         Expr::Field(data, field) => {
             let (ptr_ty, data) = eval(ctx, data);
             let (layers, ty, data) = get_last_ptr(ctx, ptr_ty, data);
@@ -394,10 +437,10 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
             let (left, right) = &**left_and_right;
             let left = eval(ctx, left).1
                 .get_num()
-                .expect("Tried to subtract non-number");
+                .expect("Tried to compare non-number");
             let right = eval(ctx, right).1
                 .get_num()
-                .expect("Tried to subtract non-number");
+                .expect("Tried to compare non-number");
             eval_bool(left < right)
         },
         &Expr::IntegerLiteral(val) => eval_num(val),
@@ -429,8 +472,24 @@ fn eval(ctx: &mut Context, expr: &Expr) -> (Type, Data) {
             let ty = first_ty.unwrap_or(Type { size: Some(0), layout: TypeLayout::Binary { bits: 0 } });
             (array_type(ty, size), Data::Array(vals))
         },
-        Expr::Call(_fun, _args) => {
-            unimplemented!();
+        Expr::Call(fun, arg_expr) => {
+            let (_, fun) = eval(ctx, fun);
+            let Function { ref params, ref algorithm } = {
+                if let Data::Function(ref name) = fun {
+                    &ctx.funs[name]
+                } else {
+                    panic!("Tried to call non-function");
+                }
+            };
+            let mut args = HashMap::with_capacity(arg_expr.len());
+            for ((param_name, param_ty), arg) in params.iter().zip(arg_expr) {
+                args.insert(param_name.clone(), eval(ctx, arg));
+            }
+            let (stack_len, bindings) = ctx.push_ctx();
+            ctx.bindings = args;
+            let result = execute(ctx, algorithm);
+            ctx.pop_ctx(stack_len, bindings);
+            result
         },
     }
 }
@@ -477,6 +536,9 @@ fn write(out: &mut [u8], ty: &Type, data: Data) {
                 assert!(fields.len() == 0, "Struct write has too many fields");
             }
         },
+        Data::Function(_) => {
+            unimplemented!();
+        }
     }
 }
 
@@ -512,6 +574,9 @@ fn read(data: &[u8], ty: &Type) -> Data {
                 fields.insert(name.clone(), read(left, field_ty));
             }
             Data::Struct(fields)
+        },
+        TypeLayout::Function { .. } => {
+            unimplemented!();
         },
         TypeLayout::Array { content, number } => {
             let mut elems = Vec::new();

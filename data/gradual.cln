@@ -1,9 +1,33 @@
+raise := (x0: b64, x: b64, n: b64, fun: b0) {
+	i := auto b64;
+	i <- 0;
+	result := auto b64;
+	result <- x0;
+	while *i < n {
+		result <- fun(*result, x);
+		i <- *i + 1;
+	}
+	return *result;
+}
+
+add := (x: b64, y: b64) {
+	return x + y;
+}
+
+mul := (x: b64, y: b64) {
+	return raise(0, x, y, add);
+}
+
+pow := (x: b64, y: b64) {
+	return raise(1, x, y, mul);
+}
 
 main := () {
 	v := alloc {x: b64, y: b64};
 	v <- { x := 0, y := 0 };
 	v.x <- 5;
-	v.y <- *v.x + 10;
+	v.y <- mul(*v.x, 2);
+	v.x <- pow(*v.y, 2);
 
 	return *v;
 }

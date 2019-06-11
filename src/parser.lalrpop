@@ -9,7 +9,7 @@ Item: Item = {
     <name: Ident> ":="
         "(" <params: Comma<Ascription>> ")" <ret: ("->" <TypeExpr>)?>
         "{" <body: Statement*> "}"
-            => Item::Function(name, params, body),
+            => Item::Function(name, Function { params, algorithm: body }),
     <Ident> ":=" <TypeExpr> ";" => Item::TypeDef(<>),
 };
 

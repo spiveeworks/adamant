@@ -26,17 +26,13 @@ fn main() {
 
     let mut itemses: Vec<_> = args.map(|path| read_code(&parser, &path)).collect();
     let items = itemses.remove(0);
-    let mut program = None;
-    for item in &items {
-        if let clean_lang::Item::Function(name, args, body) = item {
-            if name == "main" {
-                program = Some(body);
-                break;
-            }
-        }
-    }
-    let mut ctx = clean_lang::Context::new();
-    let val = execute(&mut ctx, &program.expect("No main function defined"));
+
+    let mut ctx = clean_lang::Context::new(items);
+    let enter = vec![clean_lang::Statement::Return(clean_lang::Expr::Call(
+        Box::new(clean_lang::Expr::Ident("main".into())),
+        Vec::new(),
+    ))];
+    let val = execute(&mut ctx, &enter);
 
     println!("Got result: {:?}", val);
 }
