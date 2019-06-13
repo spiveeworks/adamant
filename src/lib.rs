@@ -243,19 +243,6 @@ fn eval_type(ctx: &mut Context, ty: &TypeExpr) -> Type {
     }
 }
 
-fn fresh(ty: &Type) -> Data {
-    return Data::Binary { bits: 0, val: 0 };
-    match ty.layout {
-        TypeLayout::Binary { .. } => unimplemented!(),
-        TypeLayout::Struct { .. } => unimplemented!(),
-        TypeLayout::Array { .. } => unimplemented!(),
-        // TypeLayout::VarArray(_) => unimplemented!(),
-        TypeLayout::Function { .. } => unimplemented!(),
-        TypeLayout::Pointer { .. } => unimplemented!(),
-        TypeLayout::Untyped => unimplemented!(),
-    }
-}
-
 fn lookup<'a, K: PartialEq, V>(data: &'a mut Vec<(K, V)>, key: &K) -> Option<&'a mut V> {
     for (k, v) in data {
         if k == key {
@@ -652,11 +639,13 @@ enum Ref {
 
 enum Instruction {
     Return { ty: Type, val: Ref },
+    Add { l: Ref, r: Ref },
+    // dummy instruction for using literals
+    Assign { val: Ref },
 }
 
-#[derive(Default)]
 struct UnpackContext {
-    instructions: Vec<Instruction>,
+    instructions: Vec<(Option<String>, Instruction)>,
     reg_count: usize,
 }
 
@@ -666,23 +655,61 @@ impl UnpackContext {
         self.reg_count += 1;
         out
     }
-}
 
-fn unpack_expr(out: &mut UnpackContext, expr: &Expr) -> (Type, Ref) {
-    match expr {
-        Expr::IntegerLiteral(x) => (num_type(64),Ref::IntLiteral(*x)),
-        _ => unimplemented!(),
+    fn push_expr(self: &mut Self, bind: Option<String>, ins: Instruction) -> Ref {
+        self.instructions.push((bind.clone(), ins));
+        if let Some(name) = bind {
+            Ref::Named(name)
+        } else {
+            self.anon()
+        }
     }
 }
 
-fn unpack_alg(alg: &Vec<Statement>) -> Vec<Instruction> {
-    let mut ctx = Default::default();
+fn unpack_expr(out: &mut UnpackContext, bind: Option<String>, expr: &Expr) -> (Type, Ref) {
+    match expr {
+        Expr::AutoAlloc(_) => unimplemented!(),
+        Expr::GenAlloc(_) => unimplemented!(),
+        Expr::Deref(_) => unimplemented!(),
+        Expr::Ident(_) => unimplemented!(),
+        Expr::Field(_, _) => unimplemented!(),
+        Expr::Index(_) => unimplemented!(),
+        Expr::Plus(vals) => {
+            let (l, r) = &**vals;
+            let (_, l) = unpack_expr(out, None, l);
+            let (_, r) = unpack_expr(out, None, r);
+            let out = out.push_expr(bind, Instruction::Add { l, r });
+            (num_type(64), out)
+        },
+        Expr::Minus(_) => unimplemented!(),
+        Expr::LessThan(_) => unimplemented!(),
+        Expr::IntegerLiteral(x) => if let Some(name) = bind {
+            let instruction = Instruction::Assign { val: Ref::IntLiteral(*x) };
+            out.instructions.push((Some(name.clone()), instruction));
+            (num_type(64), Ref::Named(name))
+        } else {
+            (num_type(64), Ref::IntLiteral(*x))
+        },
+        Expr::StructLiteral(_) => unimplemented!(),
+        Expr::ArrayLiteral(_) => unimplemented!(),
+        Expr::Call(_, _) => unimplemented!(),
+    }
+}
+
+fn unpack_alg(alg: &Vec<Statement>) -> Vec<(Option<String>, Instruction)> {
+    let mut ctx = UnpackContext {
+        instructions: Vec::new(),
+        reg_count: 1, // 0 unnamed parameters + 1 unnamed basic block
+    };
     for statement in alg {
         match statement {
             Statement::Return(x) => {
-                let (ty, val) = unpack_expr(&mut ctx, x);
-                ctx.instructions.push(Instruction::Return { ty, val });
-            }
+                let (ty, val) = unpack_expr(&mut ctx, None, x);
+                ctx.instructions.push((None, Instruction::Return { ty, val }));
+            },
+            Statement::Define(name, val) => {
+                unpack_expr(&mut ctx, Some(name.clone()), val);
+            },
             _ => unimplemented!(),
         }
     }
@@ -723,11 +750,22 @@ fn compile_function(out: &mut io::Write, name: &str, f: Function)
 {
     writeln!(out, "define i64 @{}() {{", name)?;
 
-    for instruction in unpack_alg(&f.algorithm) {
+    for (name, instruction) in unpack_alg(&f.algorithm) {
+        if let Some(name) = name {
+            write!(out, "    %{} = ", name)?;
+        } else {
+            write!(out, "    ")?;
+        }
         match instruction {
+            Instruction::Assign { val } => {
+                writeln!(out, "{}", val)?;
+            },
             Instruction::Return { ty, val} => {
-                writeln!(out, "    ret {} {}", ty, val)?;
-            }
+                writeln!(out, "ret {} {}", ty, val)?;
+            },
+            Instruction::Add { l, r } => {
+                writeln!(out, "add i64 {}, {}", l, r)?;
+            },
         }
     }
     writeln!(out, "}}")?;
@@ -743,3 +781,4 @@ pub fn compile(out: &mut io::Write, items: Vec<Item>) -> io::Result<()> {
     }
     Ok(())
 }
+
