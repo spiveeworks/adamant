@@ -19,10 +19,12 @@ typedef enum {
 	T_CLOSE_BRACE,
 	T_CLOSE_PAREN,
 	T_CLOSE_BRACK,
+	T_DEFINITION,
 	T_SEMICOLON,
-	T_PUB,
-	T_OPEN,
-	T_STRUCT,
+	T_ARROW,
+	T_ASTERISK,
+	T_RETURN,
+	T_B64,
 
 	// number of possible tokens, not to be used as a variant...
 	UTOKEN_NUM,
@@ -31,7 +33,7 @@ typedef enum {
 #define T_FIRST_OPEN T_OPEN_BRACE
 #define T_LAST_OPEN T_OPEN_BRACK
 
-#define T_TOTAL_OPENS (T_LAST_OPEN - T_FIRST_OPEN)
+#define T_TOTAL_OPENS (T_LAST_OPEN - T_FIRST_OPEN + 1)
 
 // value TokenDef utokens[UTOKEN_NUM] = 
 TokenDef utokens[UTOKEN_NUM] = {
@@ -41,10 +43,12 @@ TokenDef utokens[UTOKEN_NUM] = {
 	{"}", false},
 	{")", false},
 	{"]", false},
+	{":=", false},
 	{";", false},
-	{"struct", true},
-	{"pub", true},
-	{"open", true},
+	{"->", false},
+	{"*", false},
+	{"return", true},
+	{"b64", true},
 };
 
 bool is_alphanum(char c) {
@@ -246,38 +250,6 @@ TokenTree group_tokens(TokenTree ts) {
 	return tt.tt;
 }
 
-char *render_token_tree(char *out, TokenTree in) {
-	for (int i = 0; i < in.branch_num; i++) {
-		TokenBranch *branch = &in.branches[i];
-		switch(branch->variant) {
-			case T_ALPHANUM: ;
-				substr substr = branch->data.substr;
-				out = strncpy(out, substr.start, substr.len);
-				break;
-			case T_OPEN_BRACE:
-				break;
-			case T_OPEN_PAREN:
-				break;
-			case T_OPEN_BRACK:
-				break;
-			case T_CLOSE_BRACE:
-				break;
-			case T_CLOSE_PAREN:
-				break;
-			case T_CLOSE_BRACK:
-				break;
-			case T_SEMICOLON:
-				break;
-			case T_PUB:
-				break;
-			case T_OPEN:
-				break;
-			case T_STRUCT:
-				break;
-		}
-	}
-}
-
 void destroy_tt(TokenTree tt) {
 	for (int i = 0; i < tt.branch_num; i++) {
 		TokenBranch *branch = &tt.branches[i];
@@ -288,27 +260,38 @@ void destroy_tt(TokenTree tt) {
 }
 
 void test_tokenize() {
-	char *input = "struct point{int x;int y;};";
+	// @Bug put spaces in here and check tokenizer still works
+	char *input = "main()->b64{return 0;}";
 	int len = strlen(input);
 	printf("Tokenizing...\n");
 	TokenTree ts = tokenize_flat(input, len);
-	int variants[11] = { 7, -1, 0, -1, -1, 6, -1, -1, 6, 3, 6 };
-	if (ts.branch_num != 11) {
-		printf("Wrong number of tokens: num == %d != 11\n", ts.branch_num);
+#define NUM_TOKENS 10
+	int variants[NUM_TOKENS] = { T_ALPHANUM, T_OPEN_PAREN, T_CLOSE_PAREN, T_ARROW,
+		T_B64, T_OPEN_BRACE, T_RETURN, T_ALPHANUM, T_SEMICOLON, T_CLOSE_BRACE};
+	if (ts.branch_num != NUM_TOKENS) {
+		printf("Wrong number of tokens: num == %d != %d\n", ts.branch_num, NUM_TOKENS);
 	} else {
-		for (int i = 0; i < 11; i++) {
+		for (int i = 0; i < NUM_TOKENS; i++) {
 			int actual = ts.branches[i].variant;
 			if (actual != variants[i]) {
-				printf("Wrong variant: expected[%d] != %d\n", i, actual);
+				printf("Wrong variant: for %d expected %d got %d\n", i, variants[i], actual);
 			}
 		}
 	}
 	printf("Grouping...\n");
 	TokenTree tt = group_tokens(ts);
 
-	int actual = tt.branches[2].data.subtree.branch_num;
-	if (actual != 8) {
-		printf("Wrong subtree size: branches[2].num == %d != 6\n", actual);
+	const int paren = 1;
+	int paren_size = tt.branches[paren].data.subtree.branch_num;
+	int paren_expect = 0;
+	if (paren_size != paren_expect) {
+		printf("Wrong subtree size: branches[%d].num == %d != %d\n", paren, paren_size, paren_expect);
+	}
+	const int brace = 4;
+	int brace_size = tt.branches[brace].data.subtree.branch_num;
+	int brace_expect = 3;
+	if (brace_size != brace_expect) {
+		printf("Wrong subtree size: branches[%d].num == %d != %d\n", brace, brace_size, brace_expect);
 	}
 
 	destroy_tt(ts);
@@ -319,66 +302,72 @@ void test_tokenize() {
 // parser
 
 typedef enum {
-	I_STRUCT_DECL,
-	I_STRUCT_DEF,
-	I_FUN_DEF,
-	I_FUN_DECL
+	I_FUN_DEF
 } ItemVariant;
 
-typedef enum {
-	PRIVATE,
-	PUBLIC,
-	OPEN,
-} Public;
+typedef struct {
+	int indirection;
+	TokenBranch referant;
+} Type;
 
 typedef struct {
-	ItemVariant variant;
-	Public public;
 	substr name;
-	TokenTree data;
-} Item;
+	TokenTree params;
+	Type ret_type;
+	TokenTree body;
+} Proc;
 
 typedef struct {
 	int item_num;
-	Item *items;
-} Module;
+	Proc *items;
+} Items;
 
-Module parse(TokenTree tt) {
-	Module result;
+Items parse(TokenTree tt) {
+	Items result;
 	result.item_num = 0;
-	result.items = (Item*)malloc(sizeof (Item) * (tt.branch_num / 3 + 1));
+	result.items = (Proc*)malloc(sizeof (Proc) * (tt.branch_num / 3 + 1));
 
 	TokenBranch *cb = tt.branches;
 	TokenBranch *end = cb + tt.branch_num;
 
 	while (cb < end) {
-		Item this;
-		if (cb->variant == T_PUB) {
-			this.public = PUBLIC;
-			cb++;
-		} else if (cb->variant == T_OPEN) {
-			this.public = OPEN;
-			cb++;
-		} else {
-			this.public = PRIVATE;
-		}
+		Proc this;
 
-		if (cb->variant == T_STRUCT) {
-			this.variant = I_STRUCT_DEF;
-			cb++;
+		// f (...) -> ... {...}
+		// 0 1     2      3+x
+		if (cb + 3 < end && (cb + 2)->variant == T_ARROW) {
+			this.name = cb->data.substr;
 			if (cb->variant != T_ALPHANUM) {
 				printf("Expected identifier after struct keyword");
 				exit(-1);
 			}
 			this.name = cb->data.substr;
-			cb++;
-			if (cb->variant != T_OPEN_BRACE) {
-				printf("Expected brace enclosed field list in struct definition");
+
+			cb++; //1
+			if (cb->variant != T_OPEN_PAREN) {
+				printf("Expected paren enclosed parameter list before proc definition");
 				exit(-1);
 			}
-			this.data = cb->data.subtree;
+			this.params = cb->data.subtree;
+
+			cb+=2; // 3
+			this.ret_type.indirection = 0;
+			while (cb->variant == T_ASTERISK) {
+				cb++;
+				this.ret_type.indirection++;
+			}
+			this.ret_type.referant = *cb;
+
+			cb++; // 3+x
+			if (cb->variant != T_OPEN_BRACE) {
+				printf("Expected brace enclosed parameter list in proc definition");
+				exit(-1);
+			}
+			this.body = cb->data.subtree;
+
+			cb++; // 3+x+1
 		} else {
-			printf("Currently only struct definitions are supported.");
+			printf("Currently only proc definitions are supported.");
 			exit(-1);
 		}
 		result.items[result.item_num] = this;
@@ -388,22 +377,24 @@ Module parse(TokenTree tt) {
 	return result;
 }
 
-char *render(Module in) {
+/*
+char *render(Items in) {
 	char *result = (char*)malloc(100);
-	Item *current = in.items;
-	Item *end = current + in.item_num;
+	Proc *current = in.items;
+	Proc *end = current + in.item_num;
 	while (current < end) {
-		if (current->variant == I_STRUCT_DEF) {
-			// is this what strncpy really returns?
-			result = strncpy(result, "struct ", 6);
-			result = strncpy(result, current->name.start, current->name.len);
-			result = strncpy(result, " { ", 3);
-			result = render_token_tree(result, current->data);
-			result = strncpy(result, " } ", 3);
-		}
+		// is this what strncpy really returns?
+		result = strncpy(result, current->name.start, current->name.len);
+		*result++ = '(';
+		render_token_tree(result, current->params);
+		*result++ = ')';
+		result = strncpy(result, " { ", 3);
+		result = render_token_tree(result, current->body);
+		result = strncpy(result, " } ", 3);
 	}
 	return result;
 }
+*/
 
 
 int main() {
