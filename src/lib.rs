@@ -2,6 +2,7 @@
 extern crate lalrpop_util;
 
 use std::io;
+use std::fmt;
 use std::collections::HashMap;
 
 lalrpop_mod!(parser);
@@ -114,7 +115,7 @@ impl Context {
                 funs.insert(name, fun);
             }
         }
-        
+
         Context {
             funs: leak_global(funs),
             bindings: HashMap::new(),
@@ -168,6 +169,10 @@ impl Context {
             self.heap[slab].split_at_mut(local).1
         }
     }
+}
+
+fn num_type(bits: u8) -> Type {
+    Type { size: Some(8), layout: TypeLayout::Binary { bits }}
 }
 
 fn struct_type(field_tys: Vec<(String, Type)>) -> Type {
@@ -639,28 +644,102 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
     )
 }
 
-pub fn compile(out: &mut io::Write, items: Vec<Item>) -> io::Result<()> {
-    write!(out, "{}", "
-; Copied directly from the documentation
-; Declare the string constant as a global constant.
-@.str = private unnamed_addr constant [13 x i8] c\"hello world\\0A\\00\"
-
-; External declaration of the puts function
-declare i32 @puts(i8* nocapture) nounwind
-
-; Definition of main function
-define i32 @main() noinline optnone { ; i32()*
-    ; Convert [13 x i8]* to i8  *...
-    %cast210 = getelementptr [13 x i8],[13 x i8]* @.str, i64 0, i64 0
-
-    ; Call puts function to write out the string to stdout.
-    call i32 @puts(i8* %cast210)
-    ret i32 0
+enum Ref {
+    Named(String),
+    Anon(usize),
+    IntLiteral(u64),
 }
 
-; Named metadata
-!0 = !{i32 42, null, !\"string\"}
-!foo = !{!0}
-")?;
+enum Instruction {
+    Return { ty: Type, val: Ref },
+}
+
+#[derive(Default)]
+struct UnpackContext {
+    instructions: Vec<Instruction>,
+    reg_count: usize,
+}
+
+impl UnpackContext {
+    fn anon(self: &mut Self) -> Ref {
+        let out = Ref::Anon(self.reg_count);
+        self.reg_count += 1;
+        out
+    }
+}
+
+fn unpack_expr(out: &mut UnpackContext, expr: &Expr) -> (Type, Ref) {
+    match expr {
+        Expr::IntegerLiteral(x) => (num_type(64),Ref::IntLiteral(*x)),
+        _ => unimplemented!(),
+    }
+}
+
+fn unpack_alg(alg: &Vec<Statement>) -> Vec<Instruction> {
+    let mut ctx = Default::default();
+    for statement in alg {
+        match statement {
+            Statement::Return(x) => {
+                let (ty, val) = unpack_expr(&mut ctx, x);
+                ctx.instructions.push(Instruction::Return { ty, val });
+            }
+            _ => unimplemented!(),
+        }
+    }
+    ctx.instructions
+}
+
+impl fmt::Display for Ref {
+    fn fmt(self: &Self, out: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Ref::Named(name) => {
+                write!(out, "%{}", name)?;
+            },
+            Ref::Anon(x) => {
+                write!(out, "%{}", x)?;
+            },
+            Ref::IntLiteral(x) => {
+                write!(out, "{}", x)?;
+            },
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(self: &Self, out: &mut fmt::Formatter) -> fmt::Result {
+        match self.layout {
+            TypeLayout::Binary { bits } => {
+                write!(out, "i{}", bits)?;
+            },
+            _ => unimplemented!(),
+        }
+        Ok(())
+    }
+}
+
+fn compile_function(out: &mut io::Write, name: &str, f: Function)
+    -> io::Result<()>
+{
+    writeln!(out, "define i64 @{}() {{", name)?;
+
+    for instruction in unpack_alg(&f.algorithm) {
+        match instruction {
+            Instruction::Return { ty, val} => {
+                writeln!(out, "    ret {} {}", ty, val)?;
+            }
+        }
+    }
+    writeln!(out, "}}")?;
+    Ok(())
+}
+
+pub fn compile(out: &mut io::Write, items: Vec<Item>) -> io::Result<()> {
+    for item in items {
+        match item {
+            Item::TypeDef(_, _) => unimplemented!(),
+            Item::Function(name, f) => compile_function(out, &name, f)?,
+        }
+    }
     Ok(())
 }
