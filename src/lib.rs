@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lalrpop_util;
 
+use std::io;
 use std::collections::HashMap;
 
 lalrpop_mod!(parser);
@@ -638,3 +639,28 @@ pub fn execute(ctx: &mut Context, program: &Vec<Statement>) -> (Type, Data) {
     )
 }
 
+pub fn compile(out: &mut io::Write, items: Vec<Item>) -> io::Result<()> {
+    write!(out, "{}", "
+; Copied directly from the documentation
+; Declare the string constant as a global constant.
+@.str = private unnamed_addr constant [13 x i8] c\"hello world\\0A\\00\"
+
+; External declaration of the puts function
+declare i32 @puts(i8* nocapture) nounwind
+
+; Definition of main function
+define i32 @main() noinline optnone { ; i32()*
+    ; Convert [13 x i8]* to i8  *...
+    %cast210 = getelementptr [13 x i8],[13 x i8]* @.str, i64 0, i64 0
+
+    ; Call puts function to write out the string to stdout.
+    call i32 @puts(i8* %cast210)
+    ret i32 0
+}
+
+; Named metadata
+!0 = !{i32 42, null, !\"string\"}
+!foo = !{!0}
+")?;
+    Ok(())
+}
