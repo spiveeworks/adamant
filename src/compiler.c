@@ -79,20 +79,6 @@ typedef struct TokenBranch {
 	} data;
 } TokenBranch;
 
-TokenTree new_tree(int max_branches);
-
-// borrows utokens during function
-// borrows input for lifetime of result
-TokenTree tokenize_flat(char *input, int input_len);
-
-TokenTree group_tokens(TokenTree ts);
-
-char *render_token_tree(char*out, TokenTree in);
-
-void destroy_tt(TokenTree tt);
-
-void test_tokenize();
-
 //////////////////////////////////////////
 // Tokenizer
 
@@ -243,6 +229,7 @@ groupResult group_tokens_starting_from(
 	return result;
 }
 
+// reborrows strings from ts, but allocates new branches
 TokenTree group_tokens(TokenTree ts) {
 	TokenBranch *start = ts.branches;
 	TokenBranch *end = start + ts.branch_num;
@@ -257,45 +244,6 @@ void destroy_tt(TokenTree tt) {
 			destroy_tt(branch->data.subtree);
 		}
 	}
-}
-
-void test_tokenize() {
-	// @Bug put spaces in here and check tokenizer still works
-	char *input = "main()->b64{return 0;}";
-	int len = strlen(input);
-	printf("Tokenizing...\n");
-	TokenTree ts = tokenize_flat(input, len);
-#define NUM_TOKENS 10
-	int variants[NUM_TOKENS] = { T_ALPHANUM, T_OPEN_PAREN, T_CLOSE_PAREN, T_ARROW,
-		T_B64, T_OPEN_BRACE, T_RETURN, T_ALPHANUM, T_SEMICOLON, T_CLOSE_BRACE};
-	if (ts.branch_num != NUM_TOKENS) {
-		printf("Wrong number of tokens: num == %d != %d\n", ts.branch_num, NUM_TOKENS);
-	} else {
-		for (int i = 0; i < NUM_TOKENS; i++) {
-			int actual = ts.branches[i].variant;
-			if (actual != variants[i]) {
-				printf("Wrong variant: for %d expected %d got %d\n", i, variants[i], actual);
-			}
-		}
-	}
-	printf("Grouping...\n");
-	TokenTree tt = group_tokens(ts);
-
-	const int paren = 1;
-	int paren_size = tt.branches[paren].data.subtree.branch_num;
-	int paren_expect = 0;
-	if (paren_size != paren_expect) {
-		printf("Wrong subtree size: branches[%d].num == %d != %d\n", paren, paren_size, paren_expect);
-	}
-	const int brace = 4;
-	int brace_size = tt.branches[brace].data.subtree.branch_num;
-	int brace_expect = 3;
-	if (brace_size != brace_expect) {
-		printf("Wrong subtree size: branches[%d].num == %d != %d\n", brace, brace_size, brace_expect);
-	}
-
-	destroy_tt(ts);
-	destroy_tt(tt);
 }
 
 ///////////////////////////
@@ -397,6 +345,75 @@ char *render(Items in) {
 */
 
 
+void test() {
+	// @Bug put spaces in here and check tokenizer still works
+	char *input = "main()->b64{return 0;}";
+	int len = strlen(input);
+
+	printf("Tokenizing...\n");
+	TokenTree ts = tokenize_flat(input, len);
+
+	{
+#define NUM_TOKENS 10
+		int variants[NUM_TOKENS] = {
+			T_ALPHANUM, T_OPEN_PAREN, T_CLOSE_PAREN, T_ARROW, T_B64,
+			T_OPEN_BRACE, T_RETURN, T_ALPHANUM, T_SEMICOLON, T_CLOSE_BRACE
+		};
+		if (ts.branch_num != NUM_TOKENS) {
+			printf("Wrong number of tokens: num == %d != %d\n",
+					ts.branch_num, NUM_TOKENS);
+		} else {
+			for (int i = 0; i < NUM_TOKENS; i++) {
+				int actual = ts.branches[i].variant;
+				if (actual != variants[i]) {
+					printf("Wrong variant: for %d expected %d got %d\n",
+							i, variants[i], actual);
+				}
+			}
+		}
+	}
+
+	printf("Grouping...\n");
+	TokenTree tt = group_tokens(ts);
+	destroy_tt(ts);
+
+	{
+		const int paren = 1;
+		int paren_size = tt.branches[paren].data.subtree.branch_num;
+		int paren_expect = 0;
+		if (paren_size != paren_expect) {
+			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
+					paren, paren_size, paren_expect);
+		}
+		const int brace = 4;
+		int brace_size = tt.branches[brace].data.subtree.branch_num;
+		int brace_expect = 3;
+		if (brace_size != brace_expect) {
+			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
+					brace, brace_size, brace_expect);
+		}
+	}
+
+	printf("Parsing...\n");
+	Items items = parse(tt);
+	destroy_tt(tt);
+
+	{
+		const int expected_items = 1;
+		if (items.item_num != expected_items) {
+			printf("Wrong number of procs: expected %d got %d\n",
+					expected_items, items.item_num);
+		}
+		const int brace = 4;
+		int brace_size = items.items[0].body.branch_num;
+		int brace_expect = 3;
+		if (brace_size != brace_expect) {
+			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
+					brace, brace_size, brace_expect);
+		}
+	}
+}
+
 int main() {
-	test_tokenize();
+	test();
 }
