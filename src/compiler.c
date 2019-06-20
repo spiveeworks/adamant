@@ -20,7 +20,9 @@ typedef enum {
 	T_CLOSE_PAREN,
 	T_CLOSE_BRACK,
 	T_DEFINITION,
+	T_COMMA,
 	T_SEMICOLON,
+	T_COLON,
 	T_ARROW,
 	T_ASTERISK,
 	T_RETURN,
@@ -44,7 +46,9 @@ TokenDef utokens[UTOKEN_NUM] = {
 	{")", false},
 	{"]", false},
 	{":=", false},
+	{",", false},
 	{";", false},
+	{":", false},
 	{"->", false},
 	{"*", false},
 	{"return", true},
@@ -259,8 +263,14 @@ typedef struct {
 } Type;
 
 typedef struct {
+	substr ident;
+	Type type;
+} Binding;
+
+typedef struct {
 	substr name;
-	TokenTree params;
+	int param_num;
+	Binding *params;
 	Type ret_type;
 	TokenTree body;
 } Proc;
@@ -269,6 +279,41 @@ typedef struct {
 	int item_num;
 	Proc *items;
 } Items;
+
+Type parse_type(TokenBranch **iter) {
+	Type result;
+	result.indirection = 0;
+	while ((*iter)->variant == T_ASTERISK) {
+		*iter += 1;
+		result.indirection += 1;
+	}
+	result.referant = **iter;
+	*iter += 1;
+	return result;
+}
+
+Binding parse_binding(TokenBranch **iter) {
+	Binding result;
+	// this line would make more sense in the language we're implementing
+	// iter: **[TokenBranch];
+	// ident: *TokenBranch := iter[0];
+	TokenBranch *ident = *iter;
+	if (ident->variant != T_ALPHANUM) { // *ident.variant != T_ALPHANUM
+		printf("Expected identifier in parameter list\n");
+		exit(-1);
+	}
+	result.ident = ident->data.substr;
+
+	*iter += 1;
+	if ((*iter)->variant != T_COLON) { // *iter[0].variant != T_COLON
+		printf("Expected colon in parameter type ascription\n");
+		exit(-1);
+	}
+
+	*iter += 1;
+	result.type = parse_type(iter);
+	return result;
+}
 
 Items parse(TokenTree tt) {
 	Items result;
@@ -296,19 +341,36 @@ Items parse(TokenTree tt) {
 				printf("Expected paren enclosed parameter list before proc definition");
 				exit(-1);
 			}
-			this.params = cb->data.subtree;
+			{
+				//this.params = cb->data.subtree;
+				TokenTree subtree = cb->data.subtree;
+				Binding *params = NULL;
+				if (subtree.branch_num) {
+					params = (Binding*)malloc(sizeof(Binding) * subtree.branch_num);
+				}
+				Binding *params_start = params;
+
+				TokenBranch *pb = subtree.branches;
+				TokenBranch *end = subtree.branches + subtree.branch_num;
+				while (pb < end) {
+					*params = parse_binding(&pb); // increases pb
+					if (pb < end && pb->variant != T_COMMA) {
+						printf("Expected comma in between parameters\n");
+						exit(-1);
+					}
+					pb += 1;
+					params += 1;
+				}
+
+				this.params = params;
+				this.param_num = params - params_start;
+			}
 
 			cb+=2; // 3
-			this.ret_type.indirection = 0;
-			while (cb->variant == T_ASTERISK) {
-				cb++;
-				this.ret_type.indirection++;
-			}
-			this.ret_type.referant = *cb;
+			this.ret_type = parse_type(&cb); // increases cb; 3+x
 
-			cb++; // 3+x
 			if (cb->variant != T_OPEN_BRACE) {
-				printf("Expected brace enclosed parameter list in proc definition");
+				printf("Expected brace enclosed algorithm in proc definition");
 				exit(-1);
 			}
 			this.body = cb->data.subtree;
@@ -347,16 +409,22 @@ char *render(Items in) {
 
 void test() {
 	// @Bug put spaces in here and check tokenizer still works
-	char *input = "main()->b64{return 0;}";
+	char *input = "main(argc:b64,argv:*[{b64,*[b8]}])->b64{return 0;}";
 	int len = strlen(input);
 
 	printf("Tokenizing...\n");
 	TokenTree ts = tokenize_flat(input, len);
 
 	{
-#define NUM_TOKENS 10
+#define NUM_TOKENS 27
 		int variants[NUM_TOKENS] = {
-			T_ALPHANUM, T_OPEN_PAREN, T_CLOSE_PAREN, T_ARROW, T_B64,
+			T_ALPHANUM, T_OPEN_PAREN,
+				T_ALPHANUM, T_COLON, T_B64, T_COMMA,
+				T_ALPHANUM, T_COLON, T_ASTERISK, T_OPEN_BRACK, T_OPEN_BRACE,
+					T_B64, T_COMMA,
+					T_ASTERISK, T_OPEN_BRACK, T_ALPHANUM, T_CLOSE_BRACK,
+				T_CLOSE_BRACE, T_CLOSE_BRACK,
+			T_CLOSE_PAREN, T_ARROW, T_B64,
 			T_OPEN_BRACE, T_RETURN, T_ALPHANUM, T_SEMICOLON, T_CLOSE_BRACE
 		};
 		if (ts.branch_num != NUM_TOKENS) {
@@ -380,7 +448,7 @@ void test() {
 	{
 		const int paren = 1;
 		int paren_size = tt.branches[paren].data.subtree.branch_num;
-		int paren_expect = 0;
+		const int paren_expect = 8;
 		if (paren_size != paren_expect) {
 			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
 					paren, paren_size, paren_expect);
@@ -404,12 +472,17 @@ void test() {
 			printf("Wrong number of procs: expected %d got %d\n",
 					expected_items, items.item_num);
 		}
-		const int brace = 4;
+		int param_num = items.items[0].param_num;
+		int param_expect = 2;
+		if (param_num != param_expect) {
+			printf("Wrong param num: param_num == %d != %d\n",
+					param_num, param_expect);
+		}
 		int brace_size = items.items[0].body.branch_num;
 		int brace_expect = 3;
 		if (brace_size != brace_expect) {
-			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
-					brace, brace_size, brace_expect);
+			printf("Wrong subtree size: body.num == %d != %d\n",
+					brace_size, brace_expect);
 		}
 	}
 }
