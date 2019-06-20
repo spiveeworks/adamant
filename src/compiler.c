@@ -406,6 +406,9 @@ char *render(Items in) {
 }
 */
 
+void destroy_ast(Items items) {
+	printf("Leaked AST :)\n");
+}
 
 void test() {
 	// @Bug put spaces in here and check tokenizer still works
@@ -464,7 +467,6 @@ void test() {
 
 	printf("Parsing...\n");
 	Items items = parse(tt);
-	destroy_tt(tt);
 
 	{
 		const int expected_items = 1;
@@ -485,6 +487,10 @@ void test() {
 					brace_size, brace_expect);
 		}
 	}
+	destroy_ast(items);
+	destroy_tt(tt);  // @Cleanup will ast always borrow tt?
+	                 // also what should I be @ing here...
+	                 // @Clarity? @Design? @Architecture?
 }
 
 int main() {
