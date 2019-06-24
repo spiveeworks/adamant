@@ -1,0 +1,54 @@
+
+// new concepts for novel type system in which semantic information is 'extra'
+// information layered on top of simple size/layout info.
+
+// e.g.
+write (x: i64, y: f64, out: *([b64 * 2] => {i64, f64})) -> {
+	out[0] <- x;
+	out[1] <- y;
+}
+
+// above procedure doesn't return a structure with desired properties, it
+// simply transforms a known pointer _into_ one whose referant has desired
+// properties
+
+
+// it is not actually clear if this specific ability to transform semantics by
+// calling a procedure is useful, it is just a natural consequence of wanting
+// to transform semantic in general.
+
+// In C a struct or pointer is 'usually' valid, i.e. dereferencing a pointer
+// usually won't segfault, and accessing a member of a struct usually will give
+// a meaningful value of the expected type, and enums will usually contain one
+// of their named variants.
+// it is still trivial to have pointers or structs or enums without this
+// property, however. For example the following may crash or result in
+// undefined behaviour:
+// - expressions on uninitialized variables
+// - derefing references to forgotten stack frames
+// - use after free
+// - double free
+// - null pointer error
+// - array/struct out of bounds
+// - casting shared pointers in ways only valid for unique pointers
+
+// the fact that the above are all possible is a great strength of C - basic
+// lints that detect errors without preventing the programmer from generating
+// arbitrary procedures (except for calling convention)
+// but it would be nice to have additional _optional_ lints that detect
+// additional semantic information - mainly whether data has been properly
+// initialized.
+
+// rust aims to prevent all of the above, but ends up adopting much of the
+// accumulated costs of typical C++ abstractions, while forcing those
+// abstractions on the user until they opt out with arduous `unsafe` blocks and
+// raw pointers.
+
+// it is important to note that the above failure states are symptoms of real
+// errors and are worth detecting, but not generally worth preventing
+// completely.
+
+// some semantics naturally open up from the concept of values whose type
+// changes from line to line, but it is probably a good idea to explore these
+// possibilities without losing track of the original goal/aesthetic.
+
