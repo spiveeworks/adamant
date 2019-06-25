@@ -1,4 +1,4 @@
-/rust-int/target
+/target
 /output
 **/*.rs.bk
 **/*.out
