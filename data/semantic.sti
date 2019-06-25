@@ -52,3 +52,179 @@ write (x: i64, y: f64, out: *([b64 * 2] => {i64, f64})) -> {
 // changes from line to line, but it is probably a good idea to explore these
 // possibilities without losing track of the original goal/aesthetic.
 
+
+// It seems that there are 3 different classes of semantic info that are
+// typically represented by a type system:
+// - information semantics (format, units, absoluteness)
+// - subset semantics (enums, pointer nullability, float normality)
+// - memory semantics (referant semantics, aliasing, ownership)
+
+// in addition to this the usual constructions (such as structs, tagged unions,
+// and dynamically sized arrays,) would require features of increasing
+// complexity:
+// - semantics applied to an index in an array of bytes
+//     (with names for field syntax)
+// - semantics grouped together into potentially nested structures
+// - unions between different semantics: "one of these is valid"
+//     (not necessary by itself since you can just assume contradictory
+//     semantics hold simultaneously)
+// - union introduction + elimination across branches
+// - type families + basic dependent types
+//     (array pointers, maybe polymorphic pointers)
+// - potentially arbitrary dependent types including referant dependence and
+//     equality/inequality reasoning
+
+/////////////////////////////
+// basic types and structs
+
+long : b64 := 0;
+int : b32 := 0;
+arr : [b64 * 3] := [0, 0, 0];
+
+signed : s32 := 0;
+unsigned : u32 := 0;
+
+auto_aggregate : {u32, u32} := {0, 0};
+explicit_aggregate : [b32 * 2] {@0: u32, @1: u32} := {0, 0};
+// the above types are actually interchangeable
+aggregate_coercion : [b32 * 2] {@0: u32, @1: u32} := auto_aggregate;
+
+named_fields_auto : {fst : u32, snd: u32} := {0, 0};
+named_fields_explicit : [b32 * 2] {fst @0: u32, snd @1: u32} := {0, 0};
+
+mixed_alignment_auto : {u64, u32, u32} := {0, 0, 0};
+// starting to get quite verbose
+mixed_alignment_explicit : [b64 * 2] {@0: u64, @1.fst: u32, @1.snd: u32}
+  := {0, 0};
+padding_auto : {u32, u64} := {0, 0};
+padding_explicit : [b64 * 2] {@0.fst: u32, @1: u64};
+
+nested_auto: {weight: u64, loc: {u64, u64}} := {0, {0, 0}};
+nested_semiexplicit: [b64 * 3] {weight @0: u64, loc @1: {u64, u64}};
+
+overaligned_verbose: b64 {@0.fst: u32, @0.snd: u32};
+overaligned_short: b64 {@0: {u32, u32}}; // note that .fst was always optional
+overaligned_auto: b64 {u32, u32};
+
+// underlying memory type can be used to initialize things
+array_downcasting: {u32, u32} := [0, 0];
+vector_downcasting: b32 {u32, u32} := 0;
+mixed_downcast: {u64, {u32, u32}} := [0, 0];
+
+// * syntax to concatenate data could be interesting
+// concat: {A, B} := [*a, *b];
+
+// auto is much more powerful than just LLVM struct syntax
+
+// auto fields after explicit fields
+semiauto1: [b64 * 4] {@1: u64, u64} := [0, 0, 0, 0];
+semiauto2: b64 {@0.fst.snd: u16, u16} := 0;
+
+out_of_order_decl: [b64 * 3] {@1: u64, u64, @0: u64} := [0, 0, 0];
+
+semiauto_inferred_size : {@1: u64, u64} := [0, 0, 0];
+
+// fields inside padding
+semiauto4: {data: {u64, u16}, padding @1.fst.snd: [b16 * 3]} := [0, 0];
+named_locations: {data: {u64, u16}, padding @data[1].snd: [b16 * 3]} := [0, 0];
+
+memory_overloads: {data: {{u32, u32}, {u32, u32}}, shortcut @data.2.1: u32};
+pseudo_unions: {start: b0, as_long @start: s64, as_float @start: f64,
+	as_bytes: @start [b8 * 8]};
+
+// all of the above is basically possible in Jai, for reference, but will form
+// the basis of the type system. Importantly fields are treated as an automatic
+// way of generating in-place semantics, as opposed to the other way around.
+
+// type aliases
+
+type Thing := {u64, u64};
+type ListThing := [b64] {b64, ListThing};  // hard to demonstrate recursive
+                                           // types without pointers
+
+/////////////
+// subsets
+
+type b1 := b8 {@0 < 2};
+true: b1 := 1;
+false: b1 := 0;
+// error: b1 := 2;
+
+type b7 := b8 {@0 < 128};
+
+type inferred_size := < 128; // should be fine to parse this, right?
+
+// not sure details... anonymous enums seem weird given this interpretation
+// in theory bool and b1 would be interchangeable
+// possible that true and false would not be part of the type at all? just a
+// byproduct of the enum syntax?
+// or maybe enum namespaces:
+//   x : bool := bool.true;
+type bool := enum {
+	true := 1;
+	false := 0;
+};
+
+////////////
+// unions
+
+basic_union: as_float: f32 | as_u32: u32 := 0;
+// how do we infer which is being initialized?
+// matters a lot on big endian
+// presumably this is just a scalar/array initialization like we did for
+// vectors above
+
+union_fields: {b64, u32 | i64, b64} := [0, 0, 0];
+anon_access: i64 := union_fields.2;
+
+tagged_union: {=0, u32, f32} | {=1, u64};
+tagged_union_compact: {u16, b8, =0} | {u8, i8, i8, =1};
+
+//////////////
+// pointers
+
+initialization() -> *u64 {
+	result := global b64;  // result is a *b64
+	result <- u64(0);
+	return result;
+}
+
+// really not sure how type checking works in this language, mainly with these
+// initializers... coerce b0 to =0?
+// I guess unlike the KIS language we can just make the type of 0 be =0,
+// then check each union disjunct until we find one that can unify
+// where =0 is a subtype of <1, <n+1, <=0, etc etc
+// and <128 can be coerced to i8 etc.
+null: =0 | *u64 := 0;
+
+variant_pointers(ptr: *{A, B} => {B, A}) {
+	pair := *ptr;
+	swapped := {pair.1, pair.0};
+	ptr <- pair;
+}
+
+invariant_pointers(variant: *b8 => b1, invariant: *b1) {
+	// invariant <- *variant; // error
+	variant <- *invariant;
+}
+
+temporary_variance(variant: *b1 => *b1, invariant: *b1) {
+	prev := *variant;
+	variant <- 255;
+	variant <- prev;
+}
+
+// it's not clear at all that variant pointers are that good....
+// they seem to highlight the fine-grained nature of the type system but
+// coercions already do that fine, and actually serve a purpose
+// maybe just do the C thing and treat all pointers as blindly deref-able?
+// or allow all pointers to vary and let the programmer stress over
+// aliasing?
+// that seems like the best
+
+// in reality pointers don't change types that much outside of initialization
+// representing vec appends as a pointer transformation could be very novel
+// though.... except that's the case that requires recursive no-ops to
+// rearrange types....
+// maybe I should come up with a use case first before I let this get
+// complicated
