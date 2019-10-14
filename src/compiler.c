@@ -52,6 +52,26 @@ void builder_append(Builder *builder, unsigned data_len, char *data) {
 builder_push_generic(builder_push_u64, u64)
 builder_push_generic(builder_push_u8, char)
 
+void builder_read(Builder *builder, unsigned start, unsigned size, char *out) {
+	unsigned end = start + size;
+	unsigned i = 0;
+	if (end > builder->length) {
+		printf("Tried to read past end of builder!\n");
+		exit(-1);
+	}
+	while (start + i < end) {
+		unsigned x = (start + i) / 1024, y = (start + i) % 1024;
+		unsigned diff = min_u32(1024 - y, size - i);
+		memcpy(out + i, builder->data[x] + y, diff);
+		i += diff;
+	}
+}
+
+#define builder_read_generic(name, T) T name (Builder *builder, unsigned index) { T result; builder_read(builder, index, sizeof ( T ) , (char*)&result); return result; }
+
+builder_read_generic(builder_read_u64, u64)
+builder_read_generic(builder_read_u8, char)
+
 //////////////////////////////////////////
 // Token List
 
@@ -514,6 +534,47 @@ void destroy_ast(Items items) {
 	printf("Leaked AST :)\n");
 }
 
+///////////////////////////
+// compiler
+
+void print_substr(substr substr) {
+	for (int i = 0; i < substr.len; i++) {
+		putchar(substr.start[i]);
+	}
+}
+
+void compile(Items items) {
+	for (int item = 0; item < items.item_num; item++) {
+		Proc* proc = items.items + item;
+		printf("define i64 @");	print_substr(proc->name); printf("() {\n");
+		unsigned i = 0;
+		while (i < proc->body.length) {
+			switch(builder_read_u8(&proc->body, i++)) {
+			case S_RET:
+				printf("    ret i64 ");
+				switch(builder_read_u8(&proc->body, i++)) {
+				case E_INTEGER_LITERAL:
+					printf("%d", builder_read_u64(&proc->body, i));
+					i += sizeof(u64);
+					break;
+				default:
+					printf("Invalid expression discriminant: %d\n", proc->body.data[i]);
+					exit(-1);
+				}
+				printf("\n");
+				break;
+			default:
+				printf("Invalid statement discriminant: %d\n", proc->body.data[i]);
+				exit(-1);
+			}
+		}
+		printf("}\n");
+	}
+}
+
+///////////////////////////
+// test(s)
+
 void test() {
 	// @Bug put spaces in here and check tokenizer still works
 	char *input = "main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 { return 0; }";
@@ -592,6 +653,9 @@ void test() {
 					brace_size, brace_expect);
 		}
 	}
+	
+	printf("Compiling...\n");
+	compile(items);
 	destroy_ast(items);
 }
 
