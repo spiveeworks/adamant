@@ -8,13 +8,24 @@
 //////////////////////////////////////////
 // Data structures
 
+typedef unsigned long long u64;
+
+typedef struct {
+	int len;
+	char *start;
+} substr;
+
 typedef struct {
 	unsigned length; // number of chars used
 	unsigned capacity; // number of POINTERS allocated
 	char **data;
 } Builder;
 
-void write_data(Builder *builder, unsigned data_len, char *data) {
+bool min_u32(unsigned x, unsigned y) {
+	return x < y ? y : x;
+}
+
+void builder_append(Builder *builder, unsigned data_len, char *data) {
 	unsigned i = 0;
 	while (i < data_len) {
 		unsigned x = builder->length / 1024, y = builder->length % 1024;
@@ -23,17 +34,23 @@ void write_data(Builder *builder, unsigned data_len, char *data) {
 				unsigned new_capacity = builder->capacity ? 2 * builder->capacity : 1;
 				char** new_data = (char**)malloc(new_capacity * sizeof (char*));
 				memcpy(new_data, builder->data, builder->capacity * sizeof (char*));
-				free(builder->data);
+				if (builder->data) free(builder->data);
 				builder->data = new_data;
 				builder->capacity = new_capacity;
 			}
 			builder->data[x] = (char*)malloc(1024);
 		}
-		unsigned diff = min(1024 - y, data_len - i);
+		unsigned diff = min_u32(1024 - y, data_len - i);
 		memcpy(builder->data[x] + y, data + i, diff);
 		i += diff;
+		builder->length += diff;
 	}
 }
+
+#define builder_push_generic(name, T) void name (Builder *builder, T data) { builder_append(builder, sizeof ( T ) , (char*)&data); }
+
+builder_push_generic(builder_push_u64, u64)
+builder_push_generic(builder_push_u8, char)
 
 //////////////////////////////////////////
 // Token List
@@ -96,11 +113,6 @@ bool is_alphanum(char c) {
 		('a' <= c && c <= 'z') ||
 		c == '_';
 }
-
-typedef struct {
-	int len;
-	char *start;
-} substr;
 
 struct TokenBranch;
 
@@ -302,11 +314,11 @@ typedef struct {
 } Binding;
 
 typedef enum {
-	E_CONST_WORD,
+	E_INTEGER_LITERAL,
 } ExprVariant;
 
 typedef enum {
-	RET,
+	S_RET,
 } StatementVariant;
 
 typedef struct {
@@ -354,6 +366,49 @@ Binding parse_binding(TokenBranch **iter) {
 
 	*iter += 1;
 	result.type = parse_type(iter);
+	return result;
+}
+
+Builder parse_body(TokenTree tt) {
+	Builder result = {0,0,0};
+	
+	TokenBranch *cb = tt.branches;
+	TokenBranch *end = cb + tt.branch_num;
+	
+	while (cb < end) {
+		if (cb->variant == T_RETURN) {
+			builder_push_u8(&result, S_RET);
+			cb++;
+			if (cb->variant == T_ALPHANUM) {
+				u64 data = 0;
+				for (unsigned i = 0; i < cb->data.substr.len; i++) {
+					char c = cb->data.substr.start[cb->data.substr.len - i - 1];
+					if ('0' <= c && c <= '9') {
+						data *= 10;
+						data += (u64)(c - '0');
+					} else {
+						printf("Found letter '%c' inside numeric constant\n", c);
+						exit(-1);
+					}
+				}
+				builder_push_u8(&result, E_INTEGER_LITERAL);
+				builder_push_u64(&result, data);
+			} else {
+				printf("Syntax Error: Currently only integer literals can be returned\n");
+				exit(-1);
+			}
+			cb++;
+			if (cb->variant != T_SEMICOLON) {
+				printf("Expected semicolon after statement\n");
+				exit(-1);
+			}
+			cb++;
+		} else {
+			printf("Unexpected token %d\n", cb->variant);
+			exit(-1);
+		}
+	}
+	
 	return result;
 }
 
@@ -415,7 +470,7 @@ Items parse(TokenTree tt) {
 				printf("Expected brace enclosed algorithm in proc definition");
 				exit(-1);
 			}
-			this.body = cb->data.subtree;
+			this.body = parse_body(cb->data.subtree);
 
 			cb++; // 3+x+1
 		} else {
@@ -522,8 +577,8 @@ void test() {
 			printf("Wrong param num: param_num == %d != %d\n",
 					param_num, param_expect);
 		}
-		int brace_size = items.items[0].body.branch_num;
-		int brace_expect = 3;
+		int brace_size = items.items[0].body.length;
+		int brace_expect = 10;
 		if (brace_size != brace_expect) {
 			printf("Wrong subtree size: body.num == %d != %d\n",
 					brace_size, brace_expect);
