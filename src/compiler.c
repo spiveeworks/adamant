@@ -4,6 +4,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+//////////////////////////////////////////
+// Data structures
+
+typedef struct {
+	unsigned length; // number of chars used
+	unsigned capacity; // number of POINTERS allocated
+	char **data;
+} Builder;
+
+void write_data(Builder *builder, unsigned data_len, char *data) {
+	unsigned i = 0;
+	while (i < data_len) {
+		unsigned x = builder->length / 1024, y = builder->length % 1024;
+		if (y == 0) {
+			if (x == builder->capacity) {
+				unsigned new_capacity = builder->capacity ? 2 * builder->capacity : 1;
+				char** new_data = (char**)malloc(new_capacity * sizeof (char*));
+				memcpy(new_data, builder->data, builder->capacity * sizeof (char*));
+				free(builder->data);
+				builder->data = new_data;
+				builder->capacity = new_capacity;
+			}
+			builder->data[x] = (char*)malloc(1024);
+		}
+		unsigned diff = min(1024 - y, data_len - i);
+		memcpy(builder->data[x] + y, data + i, diff);
+		i += diff;
+	}
+}
+
+//////////////////////////////////////////
+// Token List
+
 #define TOKEN_WIDTH 16
 
 typedef struct {
@@ -267,12 +301,20 @@ typedef struct {
 	Type type;
 } Binding;
 
+typedef enum {
+	E_CONST_WORD,
+} ExprVariant;
+
+typedef enum {
+	RET,
+} StatementVariant;
+
 typedef struct {
 	substr name;
 	int param_num;
 	Binding *params;
 	Type ret_type;
-	TokenTree body;
+	Builder body;
 } Proc;
 
 typedef struct {
