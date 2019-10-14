@@ -135,7 +135,7 @@ typedef struct TokenBranch {
 int prefix_whitespace(const char *input) {
 	int result = 0;
 	bool done = false;
-	while (done) {
+	while (!done) {
 		char c = input[result];
 		if (c == '\t' || c == '\n' || c == '\r' || c == ' ') {
 			result++;
@@ -509,7 +509,7 @@ void destroy_ast(Items items) {
 
 void test() {
 	// @Bug put spaces in here and check tokenizer still works
-	char *input = "main(argc:b64,argv:*[{b64,*[b8]}])->b64{return 0;}";
+	char *input = "main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 { return 0; }";
 	int len = strlen(input);
 
 	printf("Tokenizing...\n");
