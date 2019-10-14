@@ -303,9 +303,16 @@ typedef enum {
 	I_FUN_DEF
 } ItemVariant;
 
-typedef struct {
+typedef struct Type {
 	int indirection;
-	TokenBranch referant;
+	enum {
+		TY_B64,
+		TY_B8,
+		TY_ARRAY,
+		TY_STRUCT,
+	} variant;
+	unsigned length;
+	struct Type *fields;
 } Type;
 
 typedef struct {
@@ -341,7 +348,7 @@ Type parse_type(TokenBranch **iter) {
 		*iter += 1;
 		result.indirection += 1;
 	}
-	result.referant = **iter;
+	//result.referant = **iter;
 	*iter += 1;
 	return result;
 }
@@ -564,6 +571,7 @@ void test() {
 
 	printf("Parsing...\n");
 	Items items = parse(tt);
+	destroy_tt(tt);
 
 	{
 		const int expected_items = 1;
@@ -585,9 +593,6 @@ void test() {
 		}
 	}
 	destroy_ast(items);
-	destroy_tt(tt);  // @Cleanup will ast always borrow tt?
-	                 // also what should I be @ing here...
-	                 // @Clarity? @Design? @Architecture?
 }
 
 int main() {
