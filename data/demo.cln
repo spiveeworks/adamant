@@ -2,10 +2,13 @@
 // make a language as simple as possible
 // (while still being usable at scale)
 // feel like coding in C, but with the simplicity of LLVM
-// maybe some basic quality of life like defer semantics
 
 // implement self hosting as a measure of
 // language's simplicity to use _and_ implement
+
+// features that make it visibly clear how expensive
+// operations are, not to encourage optimization, 
+// but to encourage clear low level thinking
 
 /////////////////
 // Type System //
@@ -14,65 +17,56 @@
 //////////////////////////////
 // basic types
 
-my_void : b0 := 0;
-my_bool : b1 := 1;
-my_byte : b8 := 255;
-my_short : b16 := my_byte * my_byte;
-my_int : b32 := my_short * my_short;
-my_long : b64 := my_int * my_int;
+my_byte : b8 := 1 << 7;
+my_short : b16 := 1 << 15;
+my_int : b32 := 1 << 31;
+my_long : b64 := 1 << 63;
+
+// these types don't have full arithmetic so pointer
+// manipulation is recommended
+my_lllong : b128 = 999999999999999999999999999999;
+// they are useful for specifying alignment though
+my_cache_line : b1024 = 0;
+
+my_signed : s32 := -2000;
+my_unsigned : u32 := 60000 * 60000;
+my_cyclic : c8 := -255; // equal to 1, no warnings etc.
 
 my_float : f32 := 1.0e38;
 my_double : f64 := 1.0e308;
 
-//////////////////////////////
-// compound types
+my_ivector : s32x4 := my_lllong as s32x4;
+my_vector : f32x4 := my_lllong as f32x4;
 
-my_arr : [b8 * 8] := [0, 1, 2, 3, 4, 5, 6, 7];
-my_tuple : {b8, b16} := {0, 0};
-my_struct : {size : b8, max : b16} := {size := 0, max := 0};
-// unions are kind of meaningless by value... but also inevitable
-// scalar casting to union would be fine, but literals might be ambiguous
-// could just use casting in all cases - much simpler
-my_union : union {small : [b8 * 4], large : b32 } := union.small([0, 1, 2, 3]);
-my_union_alt : union {small : [b8 * 4], large : b32 } := union.large(0);
+//////////////////////////////
+// compound layouts
+
+layout MyArray = [b8 * 8];
+layout UnsizedLayout = [b8]; // or at least *[T] is valid
+layout MyTuple = {b8, b16};
+layout MyStruct = {size : b8, max : b16};
+layout MyUnion = union {small : [b8 * 4], large : b32 };
+layout MyScalar = b32;
+
+// the main use of explicit layout names is recursion
+layout MyList = {b64, *MyList};
+layout Tree := {data: f64, len: b64, children: *[Tree]};
+
+// cannot bind these to names, they only describe actual memory
+// my_tuple : {b8, b16} := {0, 1};
+
+layout Opaque;
+layout OpaquePointer = *Opaque;
+layout Opaque = {b32; *[OpaquePointer]};
 
 //////////////////////////////
 // pointer types
 
-global_int : *b32 := global int;
+global_int : *s32 := global s32;
 global_bytes : *[b8 * 8] := global [b8 * 8];
 global_struct : *{b8, b16} := global {b8, b16};
-// pointer to union as well, if unions should exist at all...
-
-//////////////////////////////
-// type aliases
-
-// no keyword needed, and capitalisation is just convention
-
-Pair := {x: f64, y: f64};
-String := {len: b64, data: *b8};
-
-//////////////////////////////
-// recursive types
-
-// just like llvm
-
-ListNode := {val: f64, next: *ListNode};
-List1 := *ListNode;
-
-List2 := *{val: f64, next: *\2};
-
-Tree1 := {root: f64, len: b64, children: *[Tree1]};
-Tree2 := {root: f64, len: b64, children: *[\3]};
-
-// rules for unifying these could get complicated....
-// here C is simpler, where structs are declared as uninitialized, whereas here
-// we can initialize recursive structs with full type checking
-// also interesting subtle things happen, like List1 and List2 above would be
-// interchangeable, and expansions of either
-
-PointerStream := *\1;
-Indeterminant := \0;
+global_pointer : **b8 := global *b8;
+global_iterator : *[b8] := global_bytes; // coercing to forget size
 
 ///////////////
 // Algorithm //
@@ -81,11 +75,12 @@ Indeterminant := \0;
 //////////////////////////////
 // Function basics
 
-basics := (x : b32) -> b32 {
+basics := (x : c32) -> c32 {
 	return x * 2;
 }
 
-// structs are already so easy, but what if there was something even easier?
+// we can't manipulate structs as values, so we just return 
+// multiple scalars
 multiple_results := -> b32, b32 {
 	return 0, 1;
 }
@@ -106,133 +101,136 @@ pointer_writes := (in: b32, out: *f32) -> {
 }
 
 locals := (val: b32) -> f32 {
-	out := local f32;
+	out : *f32 := local f32;
 	pointer_writes(val, out);
 	return *out;
 }
 
-statics := -> {b32, *[b8]} {
-	out := global [b8; 4] <- [0, 1, 2, 3];
+succinct_locals := -> f32 {
+	local p1: b32 <- 100;
+	pointer_writes(*p1, local p2: f32);
+	return *p2;
+}
+
+statics := (x : b8) -> {b32, *[b8]} {
+	out := global [b8; 4];
+	out <- x, 1, x << 2, 3 | x;
 	return {4, out as *[b8]};
 }
 
-control_flow := (scale: f32, len: b64, vals: *[f32]) -> {
-	i := local b64 <- 0;
+control_flow := (scale: f32, len: u64, vals: *[f32]) -> {
+	i := local u64 <- 0;
 	while i < len {
 		vals[i] <- scale * *vals[i];
 	}
 }
 
 //////////////////////////////
-// structural deref
+// aggregate manipulation
 
-field_value := (in: {x: b16, y: f32}) -> f32 {
-	return in.y;
-}
-unnamed_fields := (in: {b16, f32}) -> b16, f32 {
-	return in.x, in.y;
-}
 field_reborrow := (in: *{x: b16, y: f32}) -> *f32 {
 	return in.y;
 }
 field_reborrow_multiple := (in: **{x: b16, y: f32}) -> *f32 {
 	return in.y;
 }
+unnamed_fields := (in: *{b16, f32}) -> *b16, *f32 {
+	return in.0, in.1;
+}
 field_deref := (in: *{x: b16, y: f32}) -> f32 {
 	return *in.y;
 }
+aggregate_deref_1 := (in: *{x: b16, y: f32}) -> b16, f32 {
+	x, y := *in;
+	return x, y;
+}
+aggregate_deref_2 := (in: *{x: b16, y: f32}) -> b16, f32 {
+	return *in;
+}
 
-array_value := (in: [b8 * 4]) -> b8 {
+index := (in: *[b8 * 4]) -> *b8 {
 	return in[3];
 }
-array_reborrow := (in: *[b8 * 4]) -> *b8 {
+index_multiple := (in: **[b8 * 4]) -> *b8 {
 	return in[3];
 }
-array_reborrow_multiple := (in: **[b8 * 4]) -> *b8 {
-	return in[3];
-}
-array_deref := (in: *[b8 * 4]) -> b8 {
+index_deref := (in: *[b8 * 4]) -> b8 {
 	return *in[3];
 }
+array_deref := (in: *[b8 * 4]) -> b8, b8, b8, b8 {
+	return *in;
+}
 
-reborrow_writing := (x: b16, y: f32) -> *{x: b16, y: f32} {
+field_writing := (x: b16, y: f32) -> *{x: b16, y: f32} {
 	out := global {x: b16, y: f32};
 	out.0 <- x;
 	out.1 <- y;
 	return out;
 }
+aggregate_writing := (x: b16, y: f32) -> *{x: b16, y: f32} {
+	out := global {x: b16, y: f32};
+	out <- x, y;
+	return out;
+}
+multiple_results_write := (in: *{x: b16, y: f32}) -> *{b16, f32} {
+	out := global {b16, f32};
+	out <- aggregate_deref_1(in);
+}
+agg2agg := (in: *{x: b16, y: f32}) -> *{b16, f32} {
+	out := global {b16, f32};
+	out <- *in;
+}
 
 //////////////////////////////
 // heap
 
-allocation_fixed_size := (len: b64, vals: *[f64]) -> *{f64, *\2} {
-	root := local *{f64, *\2} <- null;
-	current : **{f64, *\2} := root;
-	i := local b64 <- 0;
+layout List = {f64, *List};
+allocation_fixed_size := (len: u64, vals: *[f64]) -> *List {
+	root := local *List <- null;
+	current : ***List := local **List <- root;
+	i := local u64 <- 0;
 	while i < len {
-		*current <- alloc {f64, *\2};
+		*current <- alloc List;
 		current.0 <- *vals[*i];
 		current <- current.1;
-		i <- + 1;
+		i <- *i + 1;
 	}
-	return root;
+	return *root;
 }
 
-allocation_variable_size := (list: *{f64, *\2}) -> b64, *[f64] {
-	len := local b64 <- 0;
-	current := local *{f64, *\2} <- list;
+allocation_variable_size := (list: *List) -> u64, *[f64] {
+	len := local u64 <- 0;
+	current := local *List <- list;
 	while *current {
 		current <- *current.1;
 		len <- + 1;
 	}
-	i := local b64 <- 0;
-	out := alloc [f64 * len];
+	i := local u64 <- 0;
+	out := alloc f64 * len;
 	current <- list;
-	while i < len {
+	while *i < len {
 		out[*i] <- *current.0;
-		i <- + 1;
+		i <- *i + 1;
 	}
 	return len, out;
 }
 
-reallocation := (len: b64, vals: *[f64]) -> *[f64] {
-	out := realloc vals as [f64 * 2 * len];
-	i := local b64 <- 0;
-	while i < len {
+reallocation := (len: u64, vals: *[f64]) -> *[f64] {
+	out := realloc vals as f64 * 2 * len;
+	i := local u64 <- 0;
+	while *i < len {
 		out[*i + len] <- out[*i];
 		i <- + 1;
 	}
 }
 
-freeing := (list: *{f64, *\2}) -> {
-	current := local *{f64, *\2} <- list;
+freeing := (list: *List) -> {
+	current := local *List <- list;
 	while *current {
 		next := *current.1;
 		free *current;
 		current <- next;
 	}
-}
-
-//////////////////////////////
-// untyped functions
-
-// not sure about these right now...
-
-untyped(x) -> {
-	return x;
-}
-
-// the following is defined as untyped but can only be used as a specific set
-// of overloads
-as_b32 : b0 -> b32;
-as_b32 : b1 -> b32;
-as_b32 : b8 -> b32;
-as_b32 : b16 -> b32;
-as_b32 : b32 -> b32;
-as_b32 : b68 -> b32;
-as_b32 : [b8 * 4] -> b32;
-as_b32(x) -> {
-	return x as b32;
 }
 
 //////////////////////////////
