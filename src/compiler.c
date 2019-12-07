@@ -96,6 +96,7 @@ typedef enum {
 	T_COLON,
 	T_ARROW,
 	T_ASTERISK,
+	T_PLUS,
 	T_RETURN,
 	T_B64,
 
@@ -122,6 +123,7 @@ TokenDef utokens[UTOKEN_NUM] = {
 	{":", false},
 	{"->", false},
 	{"*", false},
+	{"+", false},
 	{"return", true},
 	{"b64", true},
 };
@@ -341,7 +343,9 @@ typedef struct {
 } Binding;
 
 typedef enum {
+	E_END,
 	E_INTEGER_LITERAL,
+	E_PLUS,
 } ExprVariant;
 
 typedef enum {
@@ -396,6 +400,74 @@ Binding parse_binding(TokenBranch **iter) {
 	return result;
 }
 
+typedef enum {
+	OPSTACK_INDEX_ADDITIVE,
+} OperatorStackIndex;
+
+typedef struct {
+	enum {
+		OPSTACK_ADDITIVE_EMPTY,
+		OPSTACK_PLUS,
+	} additive;
+} OperatorStack;
+
+void opstack_flush(
+	OperatorStack *ops,
+	OperatorStackIndex flush_until,
+	Builder *out
+) {
+	switch (ops->additive) {
+		case OPSTACK_ADDITIVE_EMPTY:
+			break;
+		case OPSTACK_PLUS:
+			builder_push_u8(out, E_PLUS);
+			break;
+	}
+	ops->additive = OPSTACK_ADDITIVE_EMPTY;
+}
+
+void parse_expr_once(TokenBranch **cb, Builder *out) {
+	if ((*cb)->variant == T_ALPHANUM) {
+		u64 data = 0;
+		for (unsigned i = 0; i < (*cb)->data.substr.len; i++) {
+			char c = (*cb)->data.substr.start[(*cb)->data.substr.len - i - 1];
+			if ('0' <= c && c <= '9') {
+				data *= 10;
+				data += (u64)(c - '0');
+			} else {
+				printf("Found letter '%c' inside numeric constant\n", c);
+				exit(-1);
+			}
+		}
+		builder_push_u8(out, E_INTEGER_LITERAL);
+		builder_push_u64(out, data);
+	} else {
+		printf("Syntax Error: Currently only integer literals can be returned\n");
+		exit(-1);
+	}
+	++*cb;
+}
+
+void parse_expr(TokenBranch **cb, Builder *out, bool is_topmost) {
+	parse_expr_once(cb, out);
+	OperatorStack ops;
+	while (true) {
+		TokenVariant t = (*cb)->variant;
+		if (t == T_PLUS) {
+			opstack_flush(&ops, OPSTACK_INDEX_ADDITIVE, out);
+			++*cb;
+			parse_expr_once(cb, out);
+			ops.additive = OPSTACK_PLUS;
+		} else {
+			break;
+		}
+	}
+	opstack_flush(&ops, 0, out);
+	if (is_topmost) {
+		builder_push_u8(out, E_END);
+	}
+}
+
 Builder parse_body(TokenTree tt) {
 	Builder result = {0,0,0};
 	
@@ -406,25 +478,7 @@ Builder parse_body(TokenTree tt) {
 		if (cb->variant == T_RETURN) {
 			builder_push_u8(&result, S_RET);
 			cb++;
-			if (cb->variant == T_ALPHANUM) {
-				u64 data = 0;
-				for (unsigned i = 0; i < cb->data.substr.len; i++) {
-					char c = cb->data.substr.start[cb->data.substr.len - i - 1];
-					if ('0' <= c && c <= '9') {
-						data *= 10;
-						data += (u64)(c - '0');
-					} else {
-						printf("Found letter '%c' inside numeric constant\n", c);
-						exit(-1);
-					}
-				}
-				builder_push_u8(&result, E_INTEGER_LITERAL);
-				builder_push_u64(&result, data);
-			} else {
-				printf("Syntax Error: Currently only integer literals can be returned\n");
-				exit(-1);
-			}
-			cb++;
+			parse_expr(&cb, &result, true);
 			if (cb->variant != T_SEMICOLON) {
 				printf("Expected semicolon after statement\n");
 				exit(-1);
@@ -531,11 +585,25 @@ char *render(Items in) {
 */
 
 void destroy_ast(Items items) {
+#ifndef NDEBUG
 	printf("Leaked AST :)\n");
+#endif
 }
 
 ///////////////////////////
 // compiler
+
+typedef struct {
+	enum {
+		REF_LITERAL,
+		REF_TEMPORARY,
+		REF_VARIABLE,
+	} variant;
+	union {
+		u64 val;
+		substr ident;
+	};
+} Ref;
 
 void print_substr(substr substr) {
 	for (int i = 0; i < substr.len; i++) {
@@ -543,7 +611,78 @@ void print_substr(substr substr) {
 	}
 }
 
+void print_ref(Ref ref) {
+	switch (ref.variant) {
+		case REF_LITERAL:
+			printf("%llu", ref.val);
+			break;
+		case REF_TEMPORARY:
+			putchar('%');
+			printf("%llu", ref.val);
+			break;
+		case REF_VARIABLE:
+			putchar('%');
+			print_substr(ref.ident);
+			break;
+	}
+}
+
+size_t compile_expr(
+	Builder *data,
+	unsigned *pi,
+	u64 *temp_count,
+	size_t stack_cap,
+	Ref *stack
+) {
+	size_t stack_len = 0;
+	bool overflow = false;
+	while (true) {
+		char c = builder_read_u8(data, *pi);
+		++*pi;
+		if (c == E_END) {
+			break;
+		} else if (c == E_INTEGER_LITERAL) {
+			if (stack_len == stack_cap) {
+				overflow = true;
+				break;
+			}
+			stack[stack_len].variant = REF_LITERAL;
+			stack[stack_len].val = builder_read_u64(data, *pi);
+			++stack_len;
+			*pi += sizeof(u64);
+		} else if (c == E_PLUS) {
+			if (stack_len < 2) {
+				printf("tried to compile binary operator with less than 2 expressions on stack\n");
+				exit(-1);
+			}
+			Ref l = stack[stack_len-2], r = stack[stack_len-1];
+			printf("    add i64 ");
+			print_ref(l);
+			printf(", ");
+			print_ref(r);
+			printf("\n");
+			stack_len -= 2;
+			stack[stack_len].variant = REF_TEMPORARY;
+			stack[stack_len].val = *temp_count;
+			++*temp_count;
+			++stack_len;
+		} else {
+			printf("Invalid expression discriminant: %d\n", c);
+			exit(-1);
+		}
+	}
+	if (overflow) {
+		printf("Expression stack overflow (stack size was %lu)\n", stack_cap);
+		exit(-1);
+	}
+	return stack_len;
+}
+
 void compile(Items items) {
+	u64 temp_count = 1; // %0 is an anonymous jump label
+	// @Robustness we could just store the required depth in the bytecode
+	const size_t EXPR_STACK_CAPACITY = 16;
+	Ref stack[EXPR_STACK_CAPACITY];
 	for (int item = 0; item < items.item_num; item++) {
 		Proc* proc = items.items + item;
 		printf("define i64 @");	print_substr(proc->name); printf("() {\n");
@@ -551,20 +690,19 @@ void compile(Items items) {
 		while (i < proc->body.length) {
 			switch(builder_read_u8(&proc->body, i++)) {
 			case S_RET:
-				printf("    ret i64 ");
-				switch(builder_read_u8(&proc->body, i++)) {
-				case E_INTEGER_LITERAL:
-					printf("%d", builder_read_u64(&proc->body, i));
-					i += sizeof(u64);
-					break;
-				default:
-					printf("Invalid expression discriminant: %d\n", proc->body.data[i]);
+				; // ??
+				size_t len = compile_expr(&proc->body, &i,
+						&temp_count, EXPR_STACK_CAPACITY, stack);
+				if (len != 1) {
+					printf("Expected one expression in return statement, got: %d\n", len);
 					exit(-1);
 				}
+				printf("    ret i64 ");
+				print_ref(stack[0]);
 				printf("\n");
 				break;
 			default:
-				printf("Invalid statement discriminant: %d\n", proc->body.data[i]);
+				printf("Invalid statement discriminant: %s\n", proc->body.data[i]);
 				exit(-1);
 			}
 		}
@@ -577,14 +715,20 @@ void compile(Items items) {
 
 void test() {
 	// @Bug put spaces in here and check tokenizer still works
-	char *input = "main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 { return 0; }";
+	char *input = "\
+main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
+	return 0 + 0;\
+}";
 	int len = strlen(input);
 
+#ifndef NDEBUG
 	printf("Tokenizing...\n");
+#endif
 	TokenTree ts = tokenize_flat(input, len);
 
+#ifndef NDEBUG
 	{
-#define NUM_TOKENS 27
+#define NUM_TOKENS 29
 		int variants[NUM_TOKENS] = {
 			T_ALPHANUM, T_OPEN_PAREN,
 				T_ALPHANUM, T_COLON, T_B64, T_COMMA,
@@ -593,7 +737,9 @@ void test() {
 					T_ASTERISK, T_OPEN_BRACK, T_ALPHANUM, T_CLOSE_BRACK,
 				T_CLOSE_BRACE, T_CLOSE_BRACK,
 			T_CLOSE_PAREN, T_ARROW, T_B64,
-			T_OPEN_BRACE, T_RETURN, T_ALPHANUM, T_SEMICOLON, T_CLOSE_BRACE
+			T_OPEN_BRACE, T_RETURN,
+				T_ALPHANUM, T_PLUS, T_ALPHANUM,
+			T_SEMICOLON, T_CLOSE_BRACE
 		};
 		if (ts.branch_num != NUM_TOKENS) {
 			printf("Wrong number of tokens: num == %d != %d\n",
@@ -610,9 +756,11 @@ void test() {
 	}
 
 	printf("Grouping...\n");
+#endif
 	TokenTree tt = group_tokens(ts);
 	destroy_tt(ts);
 
+#ifndef NDEBUG
 	{
 		const int paren = 1;
 		int paren_size = tt.branches[paren].data.subtree.branch_num;
@@ -623,7 +771,7 @@ void test() {
 		}
 		const int brace = 4;
 		int brace_size = tt.branches[brace].data.subtree.branch_num;
-		int brace_expect = 3;
+		const int brace_expect = 5;
 		if (brace_size != brace_expect) {
 			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
 					brace, brace_size, brace_expect);
@@ -631,9 +779,11 @@ void test() {
 	}
 
 	printf("Parsing...\n");
+#endif
 	Items items = parse(tt);
 	destroy_tt(tt);
 
+#ifndef NDEBUG
 	{
 		const int expected_items = 1;
 		if (items.item_num != expected_items) {
@@ -641,13 +791,13 @@ void test() {
 					expected_items, items.item_num);
 		}
 		int param_num = items.items[0].param_num;
-		int param_expect = 2;
+		const int param_expect = 2;
 		if (param_num != param_expect) {
 			printf("Wrong param num: param_num == %d != %d\n",
 					param_num, param_expect);
 		}
 		int brace_size = items.items[0].body.length;
-		int brace_expect = 10;
+		const int brace_expect = 21;
 		if (brace_size != brace_expect) {
 			printf("Wrong subtree size: body.num == %d != %d\n",
 					brace_size, brace_expect);
@@ -655,6 +805,7 @@ void test() {
 	}
 	
 	printf("Compiling...\n");
+#endif
 	compile(items);
 	destroy_ast(items);
 }
