@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+FILE *debug;
 
 //////////////////////////////////////////
 // Data structures
@@ -585,9 +586,7 @@ char *render(Items in) {
 */
 
 void destroy_ast(Items items) {
-#ifndef NDEBUG
-	printf("Leaked AST :)\n");
-#endif
+	fprintf(debug, "Leaked AST :)\n");
 }
 
 ///////////////////////////
@@ -641,7 +640,7 @@ size_t compile_expr(
 		++*pi;
 		if (c == E_END) {
 			break;
-		} else if (c == E_INTEGER_LITERAL) {
+		}; if (c == E_INTEGER_LITERAL) {
 			if (stack_len == stack_cap) {
 				overflow = true;
 				break;
@@ -719,97 +718,89 @@ void test() {
 main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
 	return 0 + 0;\
 }";
-	int len = strlen(input);
+	fputs("Source:\n", debug);
+	fputs(input, debug);
+	fputc('\n', debug);
+	unsigned long len = strlen(input);
 
-#ifndef NDEBUG
-	printf("Tokenizing...\n");
-#endif
+	fprintf(debug, "Tokenizing:\n");
 	TokenTree ts = tokenize_flat(input, len);
 
-#ifndef NDEBUG
+	for (int i = 0; i < ts.branch_num; i++) {
+		fprintf(debug, " %d", ts.branches[i].variant);
+	}
+	fprintf(debug, "\n");
+
+	fprintf(debug, "Grouping...\n");
+	TokenTree tt = group_tokens(ts);
+	destroy_tt(ts);
+
 	{
-#define NUM_TOKENS 29
-		int variants[NUM_TOKENS] = {
-			T_ALPHANUM, T_OPEN_PAREN,
-				T_ALPHANUM, T_COLON, T_B64, T_COMMA,
-				T_ALPHANUM, T_COLON, T_ASTERISK, T_OPEN_BRACK, T_OPEN_BRACE,
-					T_B64, T_COMMA,
-					T_ASTERISK, T_OPEN_BRACK, T_ALPHANUM, T_CLOSE_BRACK,
-				T_CLOSE_BRACE, T_CLOSE_BRACK,
-			T_CLOSE_PAREN, T_ARROW, T_B64,
-			T_OPEN_BRACE, T_RETURN,
-				T_ALPHANUM, T_PLUS, T_ALPHANUM,
-			T_SEMICOLON, T_CLOSE_BRACE
-		};
-		if (ts.branch_num != NUM_TOKENS) {
-			printf("Wrong number of tokens: num == %d != %d\n",
-					ts.branch_num, NUM_TOKENS);
-		} else {
-			for (int i = 0; i < NUM_TOKENS; i++) {
-				int actual = ts.branches[i].variant;
-				if (actual != variants[i]) {
-					printf("Wrong variant: for %d expected %d got %d\n",
-							i, variants[i], actual);
+// @Robustness measure actual depth of token tree? store depth?
+#define GROUP_DEBUG_STACK_LEN 32
+		TokenTree trees[GROUP_DEBUG_STACK_LEN];
+		int indeces[GROUP_DEBUG_STACK_LEN];
+		int s = 0;
+		trees[0] = tt;
+		indeces[0] = 0;
+		while (true) {
+			if (indeces[s] >= trees[s].branch_num) {
+				s -= 1;
+				if (s < 0) {
+					break;
+				}
+				TokenVariant v = trees[s].branches[indeces[s]].variant;
+				fputc('\n', debug);
+				for (int i = 0; i < s; i++) {
+					fputs("    ", debug);
+				}
+				fputc(' ', debug);
+				fprintf(debug, "%s", utokens[v + T_TOTAL_OPENS].str);
+				indeces[s] += 1;
+			} else {
+				TokenBranch *branch = &trees[s].branches[indeces[s]];
+				TokenVariant v = branch->variant;
+				fputc(' ', debug);
+				if (v == T_ALPHANUM) {
+					fputc('"', debug);
+					for (int i = 0; i < branch->data.substr.len; i++) {
+						fputc(branch->data.substr.start[i], debug);
+					}
+					fputc('"', debug);
+				} else {
+					fprintf(debug, "%s", utokens[v].str);
+				}
+				if (T_FIRST_OPEN <= v && v <= T_LAST_OPEN) {
+					s += 1;
+					if (s >= GROUP_DEBUG_STACK_LEN) {
+						printf("Token tree too deep for print routine!\n");
+						exit(-1);
+					}
+					trees[s] = branch->data.subtree;
+					indeces[s] = 0;
+					fputc('\n', debug);
+					for (int i = 0; i < s; i++) {
+						fputs("    ", debug);
+					}
+				} else {
+					indeces[s]++;
 				}
 			}
 		}
 	}
+	fputc('\n', debug);
 
-	printf("Grouping...\n");
-#endif
-	TokenTree tt = group_tokens(ts);
-	destroy_tt(ts);
-
-#ifndef NDEBUG
-	{
-		const int paren = 1;
-		int paren_size = tt.branches[paren].data.subtree.branch_num;
-		const int paren_expect = 8;
-		if (paren_size != paren_expect) {
-			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
-					paren, paren_size, paren_expect);
-		}
-		const int brace = 4;
-		int brace_size = tt.branches[brace].data.subtree.branch_num;
-		const int brace_expect = 5;
-		if (brace_size != brace_expect) {
-			printf("Wrong subtree size: branches[%d].num == %d != %d\n",
-					brace, brace_size, brace_expect);
-		}
-	}
-
-	printf("Parsing...\n");
-#endif
+	fprintf(debug, "Parsing...\n");
 	Items items = parse(tt);
 	destroy_tt(tt);
 
-#ifndef NDEBUG
-	{
-		const int expected_items = 1;
-		if (items.item_num != expected_items) {
-			printf("Wrong number of procs: expected %d got %d\n",
-					expected_items, items.item_num);
-		}
-		int param_num = items.items[0].param_num;
-		const int param_expect = 2;
-		if (param_num != param_expect) {
-			printf("Wrong param num: param_num == %d != %d\n",
-					param_num, param_expect);
-		}
-		int brace_size = items.items[0].body.length;
-		const int brace_expect = 21;
-		if (brace_size != brace_expect) {
-			printf("Wrong subtree size: body.num == %d != %d\n",
-					brace_size, brace_expect);
-		}
-	}
-	
-	printf("Compiling...\n");
-#endif
+	fprintf(debug, "Compiling...\n");
 	compile(items);
 	destroy_ast(items);
 }
 
 int main() {
+	debug = fopen("output/debug.txt", "w");  // errors, who cares
 	test();
+	fclose(debug);
 }

@@ -1,2 +1,2 @@
 #!/bin/sh
-tcc src/compiler.c -run
+tcc src/compiler.c -run > output/a.ll
