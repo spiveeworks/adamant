@@ -1,7 +1,7 @@
 Source:
-main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {	return 0 + 0;}
+main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {	return 1 + 2 + (3 + 4);}
 Tokenizing:
- -1 1 -1 9 14 7 -1 9 11 2 0 14 7 11 2 -1 5 3 5 4 10 14 0 13 -1 12 -1 8 3
+ -1 1 -1 9 14 7 -1 9 11 2 0 14 7 11 2 -1 5 3 5 4 10 14 0 13 -1 12 -1 12 1 -1 12 -1 4 8 3
 Grouping...
  "main" (
      "argc" : b64 , "argv" : * [
@@ -12,7 +12,9 @@ Grouping...
          }
      ]
  ) -> b64 {
-     return "0" + "0" ;
+     return "1" + "2" + (
+         "3" + "4"
+     ) ;
  }
 Parsing...
 Compiling...

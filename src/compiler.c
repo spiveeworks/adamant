@@ -427,6 +427,8 @@ void opstack_flush(
 	ops->additive = OPSTACK_ADDITIVE_EMPTY;
 }
 
+void parse_expr(TokenBranch **, Builder *, bool);
+
 void parse_expr_once(TokenBranch **cb, Builder *out) {
 	if ((*cb)->variant == T_ALPHANUM) {
 		u64 data = 0;
@@ -442,16 +444,26 @@ void parse_expr_once(TokenBranch **cb, Builder *out) {
 		}
 		builder_push_u8(out, E_INTEGER_LITERAL);
 		builder_push_u64(out, data);
+	} else if ((*cb)->variant == T_OPEN_PAREN) {
+		TokenTree *subtree = &(*cb)->data.subtree;
+		TokenBranch *start = subtree->branches;
+		TokenBranch *end = start + subtree->branch_num;
+		parse_expr(&start, out, false);
+		if (start != end) {
+			printf("Syntax Error: Expected ')'.\n");
+			exit(-1);
+		}
 	} else {
-		printf("Syntax Error: Currently only integer literals can be returned\n");
+		printf("Syntax Error: Expected '(' or integer literal.\n");
 		exit(-1);
 	}
 	++*cb;
 }
 
 void parse_expr(TokenBranch **cb, Builder *out, bool is_topmost) {
+	// @Performance explicit stack instead of recursion
 	parse_expr_once(cb, out);
-	OperatorStack ops;
+	OperatorStack ops = {};
 	while (true) {
 		TokenVariant t = (*cb)->variant;
 		if (t == T_PLUS) {
@@ -716,7 +728,7 @@ void test() {
 	// @Bug put spaces in here and check tokenizer still works
 	char *input = "\
 main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
-	return 0 + 0;\
+	return 1 + 2 + (3 + 4);\
 }";
 	fputs("Source:\n", debug);
 	fputs(input, debug);
