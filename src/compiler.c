@@ -26,6 +26,10 @@ bool min_u32(unsigned x, unsigned y) {
 	return x < y ? y : x;
 }
 
+char *builder_get_ptr(Builder *builder, unsigned i) {
+	return &builder->data[i / 1024][i % 1024];
+}
+
 void builder_append(Builder *builder, unsigned data_len, char *data) {
 	unsigned i = 0;
 	while (i < data_len) {
@@ -95,11 +99,14 @@ typedef enum {
 	T_COMMA,
 	T_SEMICOLON,
 	T_COLON,
+	T_BIND,
 	T_ARROW,
 	T_ASTERISK,
 	T_PLUS,
 	T_RETURN,
 	T_B64,
+	T_B8,
+	T_LOCAL,
 
 	// number of possible tokens, not to be used as a variant...
 	UTOKEN_NUM,
@@ -122,11 +129,14 @@ TokenDef utokens[UTOKEN_NUM] = {
 	{",", false},
 	{";", false},
 	{":", false},
+	{"<-", false},
 	{"->", false},
 	{"*", false},
 	{"+", false},
 	{"return", true},
 	{"b64", true},
+	{"b8", true},
+	{"local", true},
 };
 
 bool is_alphanum(char c) {
@@ -350,8 +360,16 @@ typedef enum {
 } ExprVariant;
 
 typedef enum {
+	S_EVAL,
+	S_LOCAL,
 	S_RET,
 } StatementVariant;
+
+typedef enum {
+	SL_DISCARD,
+	SL_DEF,
+	SL_WRITE,
+} OutputLocation;
 
 typedef struct {
 	substr name;
@@ -366,6 +384,7 @@ typedef struct {
 	Proc *items;
 } Items;
 
+// @Robustness we might walk past end of array
 Type parse_type(TokenBranch **iter) {
 	Type result;
 	result.indirection = 0;
@@ -373,7 +392,49 @@ Type parse_type(TokenBranch **iter) {
 		*iter += 1;
 		result.indirection += 1;
 	}
-	//result.referant = **iter;
+	result.length = 0;
+	if ((*iter)->variant == T_B64) {
+		result.variant = TY_B64;
+	} else if ((*iter)->variant == T_B8) {
+		result.variant = TY_B8;
+	} else if ((*iter)->variant == T_OPEN_BRACK) {
+		result.variant = TY_ARRAY;
+		result.length = 1;
+		result.fields = malloc(sizeof(Type));
+		TokenBranch *start = (*iter)->data.subtree.branches;
+		TokenBranch *end = start + (*iter)->data.subtree.branch_num;
+		*result.fields = parse_type(&start);
+		if (start != end) {
+			printf("Expected close bracket after type\n");
+			exit(-1);
+		}
+	} else if ((*iter)->variant == T_OPEN_BRACE) {
+		result.variant = TY_STRUCT;
+		int size_guess = (*iter)->data.subtree.branch_num / 2 + 1;
+		// @Performance linear allocator would do nicely here
+		// or another serialized builder structure? maybe not.
+		result.fields = malloc(sizeof(Type)*size_guess);
+		bool comma = true;
+		TokenBranch *start = (*iter)->data.subtree.branches;
+		TokenBranch *end = start + (*iter)->data.subtree.branch_num;
+		while (start < end) {
+			if (comma) {
+				if (start->variant == T_COMMA) {
+					printf("Expected type after comma in struct type");
+					exit(-1);
+				}
+				result.fields[result.length] = parse_type(&start);
+				result.length += 1;
+			} else {
+				if (start->variant != T_COMMA) {
+					printf("Expected comma after type in struct type");
+					exit(-1);
+				}
+				comma = true;
+				start += 1;
+			}
+		}
+	}
 	*iter += 1;
 	return result;
 }
@@ -492,17 +553,40 @@ Builder parse_body(TokenTree tt) {
 			builder_push_u8(&result, S_RET);
 			cb++;
 			parse_expr(&cb, &result, true);
-			if (cb->variant != T_SEMICOLON) {
-				printf("Expected semicolon after statement\n");
-				exit(-1);
-			}
+		} else if (cb->variant == T_LOCAL) {
+			builder_push_u8(&result, S_LOCAL);
 			cb++;
 		} else {
-			printf("Unexpected token %d\n", cb->variant);
+			builder_push_u8(&result, S_EVAL);
+			builder_push_u8(&result, 0);
+			char *length = builder_get_ptr(&result, result.length-1);
+			builder_push_u8(&result, SL_DISCARD);
+			OutputLocation *loc = (OutputLocation*)builder_get_ptr(&result, result.length-1);
+			parse_expr(&cb, &result, true);
+			if (cb->variant == T_DEFINITION) {
+				*length += 1;
+				*loc = SL_DEF;
+				cb++;
+				builder_push_u8(&result, SL_DISCARD);
+				parse_expr(&cb, &result, true);
+			} else if (cb->variant == T_BIND) {
+				*length += 1;
+				*loc = SL_WRITE;
+				cb++;
+				builder_push_u8(&result, SL_DISCARD);
+				parse_expr(&cb, &result, true);
+			} else {
+				printf("Unexpected token %d\n", cb->variant);
+				exit(-1);
+			}
+		}
+		if (cb->variant != T_SEMICOLON) {
+			printf("Expected semicolon after statement\n");
 			exit(-1);
 		}
+		cb++;
 	}
-	
+
 	return result;
 }
 
@@ -728,7 +812,10 @@ void test() {
 	// @Bug put spaces in here and check tokenizer still works
 	char *input = "\
 main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
-	return 1 + 2 + (3 + 4);\
+	local x: b64;\
+	x <- 1;\
+	y: b64 := 2;\
+	return *x + y;\
 }";
 	fputs("Source:\n", debug);
 	fputs(input, debug);
