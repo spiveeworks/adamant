@@ -1,7 +1,7 @@
 Source:
-main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {	local x: b64;	x <- 1;	y: b64 := 2;	return *x + y;}
+main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {	local x: b64;	x <- 1;	y := 2;	return *x + y;}
 Tokenizing:
- -1 1 -1 9 15 7 -1 9 12 2 0 15 7 12 2 16 5 3 5 4 11 15 0 17 -1 9 15 8 -1 10 -1 8 -1 9 15 6 -1 8 14 12 -1 13 -1 8 3
+ -1 1 -1 9 15 7 -1 9 12 2 0 15 7 12 2 16 5 3 5 4 11 15 0 17 -1 9 15 8 -1 10 -1 8 -1 6 -1 8 14 12 -1 13 -1 8 3
 Grouping...
  "main" (
      "argc" : b64 , "argv" : * [
@@ -12,6 +12,12 @@ Grouping...
          }
      ]
  ) -> b64 {
-     local "x" : b64 ; "x" <- "1" ; "y" : b64 := "2" ; return * "x" + "y" ;
+     local "x" : b64 ; "x" <- "1" ; "y" := "2" ; return * "x" + "y" ;
  }
 Parsing...
+argc: b64
+argv: *[{b64,*[b8]}]
+-> b64
+
+x: b64
+Compiling...

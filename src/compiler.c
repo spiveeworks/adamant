@@ -16,6 +16,10 @@ typedef struct {
 	char *start;
 } substr;
 
+void fputsubstr(substr substr, FILE *out) {
+	fwrite(substr.start, 1, substr.len, out);
+}
+
 typedef struct {
 	unsigned length; // number of chars used
 	unsigned capacity; // number of POINTERS allocated
@@ -56,6 +60,7 @@ void builder_append(Builder *builder, unsigned data_len, char *data) {
 
 builder_push_generic(builder_push_u64, u64)
 builder_push_generic(builder_push_u8, char)
+builder_push_generic(builder_push_substr, substr)
 
 void builder_read(Builder *builder, unsigned start, unsigned size, char *out) {
 	unsigned end = start + size;
@@ -76,6 +81,7 @@ void builder_read(Builder *builder, unsigned start, unsigned size, char *out) {
 
 builder_read_generic(builder_read_u64, u64)
 builder_read_generic(builder_read_u8, char)
+builder_read_generic(builder_read_substr, substr)
 
 //////////////////////////////////////////
 // Token List
@@ -355,7 +361,9 @@ typedef struct {
 
 typedef enum {
 	E_END,
+	E_IDENT,
 	E_INTEGER_LITERAL,
+	E_DEREF,
 	E_PLUS,
 } ExprVariant;
 
@@ -389,15 +397,19 @@ Type parse_type(TokenBranch **iter) {
 	Type result;
 	result.indirection = 0;
 	while ((*iter)->variant == T_ASTERISK) {
+		fputc('*', debug);
 		*iter += 1;
 		result.indirection += 1;
 	}
 	result.length = 0;
 	if ((*iter)->variant == T_B64) {
+		fputs("b64", debug);
 		result.variant = TY_B64;
 	} else if ((*iter)->variant == T_B8) {
+		fputs("b8", debug);
 		result.variant = TY_B8;
 	} else if ((*iter)->variant == T_OPEN_BRACK) {
+		fputc('[', debug);
 		result.variant = TY_ARRAY;
 		result.length = 1;
 		result.fields = malloc(sizeof(Type));
@@ -408,7 +420,9 @@ Type parse_type(TokenBranch **iter) {
 			printf("Expected close bracket after type\n");
 			exit(-1);
 		}
+		fputc(']', debug);
 	} else if ((*iter)->variant == T_OPEN_BRACE) {
+		fputc('{', debug);
 		result.variant = TY_STRUCT;
 		int size_guess = (*iter)->data.subtree.branch_num / 2 + 1;
 		// @Performance linear allocator would do nicely here
@@ -420,20 +434,23 @@ Type parse_type(TokenBranch **iter) {
 		while (start < end) {
 			if (comma) {
 				if (start->variant == T_COMMA) {
-					printf("Expected type after comma in struct type");
+					printf("Expected type after comma in struct type\n");
 					exit(-1);
 				}
+				comma = false;
 				result.fields[result.length] = parse_type(&start);
 				result.length += 1;
 			} else {
 				if (start->variant != T_COMMA) {
-					printf("Expected comma after type in struct type");
+					printf("Expected comma after type in struct type\n");
 					exit(-1);
 				}
+				fputc(',', debug);
 				comma = true;
 				start += 1;
 			}
 		}
+		fputc('}', debug);
 	}
 	*iter += 1;
 	return result;
@@ -458,7 +475,10 @@ Binding parse_binding(TokenBranch **iter) {
 	}
 
 	*iter += 1;
+	fputsubstr(result.ident, debug);
+	fputs(": ", debug);
 	result.type = parse_type(iter);
+	fputc('\n', debug);
 	return result;
 }
 
@@ -471,6 +491,7 @@ typedef struct {
 		OPSTACK_ADDITIVE_EMPTY,
 		OPSTACK_PLUS,
 	} additive;
+	unsigned derefs;
 } OperatorStack;
 
 void opstack_flush(
@@ -486,25 +507,35 @@ void opstack_flush(
 			break;
 	}
 	ops->additive = OPSTACK_ADDITIVE_EMPTY;
+	for (int i = 0; i < ops->derefs; i++) {
+		builder_push_u8(out, E_DEREF);
+	}
+	ops->derefs = 0;
 }
 
 void parse_expr(TokenBranch **, Builder *, bool);
 
 void parse_expr_once(TokenBranch **cb, Builder *out) {
 	if ((*cb)->variant == T_ALPHANUM) {
-		u64 data = 0;
-		for (unsigned i = 0; i < (*cb)->data.substr.len; i++) {
-			char c = (*cb)->data.substr.start[(*cb)->data.substr.len - i - 1];
-			if ('0' <= c && c <= '9') {
-				data *= 10;
-				data += (u64)(c - '0');
-			} else {
-				printf("Found letter '%c' inside numeric constant\n", c);
-				exit(-1);
+		char c = (*cb)->data.substr.start[0];
+		if ('0' <= c && c <= '9') {
+			u64 data = 0;
+			for (unsigned i = 0; i < (*cb)->data.substr.len; i++) {
+				char c = (*cb)->data.substr.start[(*cb)->data.substr.len - i - 1];
+				if ('0' <= c && c <= '9') {
+					data *= 10;
+					data += (u64)(c - '0');
+				} else {
+					printf("Found letter '%c' inside numeric constant\n", c);
+					exit(-1);
+				}
 			}
+			builder_push_u8(out, E_INTEGER_LITERAL);
+			builder_push_u64(out, data);
+		} else {
+			builder_push_u8(out, E_IDENT);
+			builder_push_substr(out, (*cb)->data.substr);
 		}
-		builder_push_u8(out, E_INTEGER_LITERAL);
-		builder_push_u64(out, data);
 	} else if ((*cb)->variant == T_OPEN_PAREN) {
 		TokenTree *subtree = &(*cb)->data.subtree;
 		TokenBranch *start = subtree->branches;
@@ -515,16 +546,20 @@ void parse_expr_once(TokenBranch **cb, Builder *out) {
 			exit(-1);
 		}
 	} else {
-		printf("Syntax Error: Expected '(' or integer literal.\n");
+		printf("Syntax Error: Expected expression.\n");
 		exit(-1);
 	}
 	++*cb;
 }
 
 void parse_expr(TokenBranch **cb, Builder *out, bool is_topmost) {
+	OperatorStack ops = {};
+	while ((*cb)->variant == T_ASTERISK) {
+		ops.derefs += 1;
+		++*cb;
+	}
 	// @Performance explicit stack instead of recursion
 	parse_expr_once(cb, out);
-	OperatorStack ops = {};
 	while (true) {
 		TokenVariant t = (*cb)->variant;
 		if (t == T_PLUS) {
@@ -556,6 +591,8 @@ Builder parse_body(TokenTree tt) {
 		} else if (cb->variant == T_LOCAL) {
 			builder_push_u8(&result, S_LOCAL);
 			cb++;
+			Binding ident = parse_binding(&cb);
+			builder_push_substr(&result, ident.ident);
 		} else {
 			builder_push_u8(&result, S_EVAL);
 			builder_push_u8(&result, 0);
@@ -642,7 +679,9 @@ Items parse(TokenTree tt) {
 			}
 
 			cb+=2; // 3
+			fputs("-> ", debug);
 			this.ret_type = parse_type(&cb); // increases cb; 3+x
+			fputs("\n\n", debug);
 
 			if (cb->variant != T_OPEN_BRACE) {
 				printf("Expected brace enclosed algorithm in proc definition");
@@ -789,7 +828,7 @@ void compile(Items items) {
 				size_t len = compile_expr(&proc->body, &i,
 						&temp_count, EXPR_STACK_CAPACITY, stack);
 				if (len != 1) {
-					printf("Expected one expression in return statement, got: %d\n", len);
+					printf("Expected one expression in return statement, got: %llu\n", len);
 					exit(-1);
 				}
 				printf("    ret i64 ");
@@ -797,7 +836,7 @@ void compile(Items items) {
 				printf("\n");
 				break;
 			default:
-				printf("Invalid statement discriminant: %s\n", proc->body.data[i]);
+				printf("Invalid statement discriminant: %d\n", *builder_get_ptr(&proc->body, i));
 				exit(-1);
 			}
 		}
@@ -814,7 +853,7 @@ void test() {
 main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
 	local x: b64;\
 	x <- 1;\
-	y: b64 := 2;\
+	y := 2;\
 	return *x + y;\
 }";
 	fputs("Source:\n", debug);
@@ -862,9 +901,7 @@ main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
 				fputc(' ', debug);
 				if (v == T_ALPHANUM) {
 					fputc('"', debug);
-					for (int i = 0; i < branch->data.substr.len; i++) {
-						fputc(branch->data.substr.start[i], debug);
-					}
+					fputsubstr(branch->data.substr, debug);
 					fputc('"', debug);
 				} else {
 					fprintf(debug, "%s", utokens[v].str);
