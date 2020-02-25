@@ -34,6 +34,14 @@ char *builder_get_ptr(Builder *builder, unsigned i) {
 	return &builder->data[i / 1024][i % 1024];
 }
 
+void builder_log(Builder *data) {
+	fputs("proc = ", debug);
+	for (int j = 0; j < data->length; j++) {
+		fprintf(debug, " %u", (unsigned char) *builder_get_ptr(data, j));
+	}
+	fputs("\n", debug);
+}
+
 void builder_append(Builder *builder, unsigned data_len, char *data) {
 	unsigned i = 0;
 	while (i < data_len) {
@@ -374,7 +382,7 @@ typedef enum {
 } StatementVariant;
 
 typedef enum {
-	SL_DISCARD,
+	SL_DISCARD = 70,
 	SL_DEF,
 	SL_WRITE,
 } OutputLocation;
@@ -503,11 +511,13 @@ void opstack_flush(
 		case OPSTACK_ADDITIVE_EMPTY:
 			break;
 		case OPSTACK_PLUS:
+			fputs(" +", debug);
 			builder_push_u8(out, E_PLUS);
 			break;
 	}
 	ops->additive = OPSTACK_ADDITIVE_EMPTY;
 	for (int i = 0; i < ops->derefs; i++) {
+		fputs(" *_", debug);
 		builder_push_u8(out, E_DEREF);
 	}
 	ops->derefs = 0;
@@ -530,9 +540,13 @@ void parse_expr_once(TokenBranch **cb, Builder *out) {
 					exit(-1);
 				}
 			}
+			fprintf(debug, " %llu", data);
 			builder_push_u8(out, E_INTEGER_LITERAL);
 			builder_push_u64(out, data);
 		} else {
+			fputs(" \"", debug);
+			fputsubstr((*cb)->data.substr, debug);
+			fputs("\"", debug);
 			builder_push_u8(out, E_IDENT);
 			builder_push_substr(out, (*cb)->data.substr);
 		}
@@ -585,10 +599,13 @@ Builder parse_body(TokenTree tt) {
 	
 	while (cb < end) {
 		if (cb->variant == T_RETURN) {
+			fputs("RET", debug);
 			builder_push_u8(&result, S_RET);
 			cb++;
 			parse_expr(&cb, &result, true);
+			fputs("\n", debug);
 		} else if (cb->variant == T_LOCAL) {
+			fputs("LOCAL ", debug);
 			builder_push_u8(&result, S_LOCAL);
 			cb++;
 			Binding ident = parse_binding(&cb);
@@ -598,24 +615,24 @@ Builder parse_body(TokenTree tt) {
 			builder_push_u8(&result, 0);
 			char *length = builder_get_ptr(&result, result.length-1);
 			builder_push_u8(&result, SL_DISCARD);
-			OutputLocation *loc = (OutputLocation*)builder_get_ptr(&result, result.length-1);
+			char *loc = builder_get_ptr(&result, result.length-1);
 			parse_expr(&cb, &result, true);
 			if (cb->variant == T_DEFINITION) {
+				fputs(" :=", debug);
 				*length += 1;
 				*loc = SL_DEF;
 				cb++;
 				builder_push_u8(&result, SL_DISCARD);
 				parse_expr(&cb, &result, true);
 			} else if (cb->variant == T_BIND) {
+				fputs(" <-", debug);
 				*length += 1;
 				*loc = SL_WRITE;
 				cb++;
 				builder_push_u8(&result, SL_DISCARD);
 				parse_expr(&cb, &result, true);
-			} else {
-				printf("Unexpected token %d\n", cb->variant);
-				exit(-1);
 			}
+			fputs("\n", debug);
 		}
 		if (cb->variant != T_SEMICOLON) {
 			printf("Expected semicolon after statement\n");
@@ -775,7 +792,16 @@ size_t compile_expr(
 		++*pi;
 		if (c == E_END) {
 			break;
-		}; if (c == E_INTEGER_LITERAL) {
+		}; if (c == E_IDENT) {
+			if (stack_len == stack_cap) {
+				overflow = true;
+				break;
+			}
+			stack[stack_len].variant = REF_VARIABLE;
+			stack[stack_len].ident = builder_read_substr(data, *pi);
+			++stack_len;
+			*pi += sizeof(substr);
+		} else if (c == E_INTEGER_LITERAL) {
 			if (stack_len == stack_cap) {
 				overflow = true;
 				break;
@@ -784,6 +810,18 @@ size_t compile_expr(
 			stack[stack_len].val = builder_read_u64(data, *pi);
 			++stack_len;
 			*pi += sizeof(u64);
+		} else if (c == E_DEREF) {
+			if (stack_len < 1) {
+				printf("tried to compile unary operator with no expressions on stack\n");
+				exit(-1);
+			}
+			Ref x = stack[stack_len-1];
+			printf("    load i64, i64* ");
+			print_ref(x);
+			printf("\n");
+			stack[stack_len-1].variant = REF_TEMPORARY;
+			stack[stack_len-1].val = *temp_count;
+			*temp_count += 1;
 		} else if (c == E_PLUS) {
 			if (stack_len < 2) {
 				printf("tried to compile binary operator with less than 2 expressions on stack\n");
@@ -812,6 +850,26 @@ size_t compile_expr(
 	return stack_len;
 }
 
+substr program_read_ident(
+	Builder *data,
+	unsigned *pi
+) {
+	char cs = builder_read_u8(data, *pi);
+	if (cs != E_IDENT) {
+		printf("expected identifier? got %d\n", cs);
+		exit(-1);
+	}
+	*pi += 1;
+	substr result = builder_read_substr(data, *pi);
+	*pi += sizeof(substr);
+	char ce = builder_read_u8(data, *pi);
+	if (ce != E_END) {
+		printf("expected expression end?\n");
+	}
+	*pi += 1;
+	return result;
+}
+
 void compile(Items items) {
 	u64 temp_count = 1; // %0 is an anonymous jump label
 	// @Robustness we could just store the required depth in the bytecode
@@ -823,8 +881,72 @@ void compile(Items items) {
 		unsigned i = 0;
 		while (i < proc->body.length) {
 			switch(builder_read_u8(&proc->body, i++)) {
+			case S_EVAL:
+			{
+				unsigned char len = builder_read_u8(&proc->body, i++);
+				if (len != 1) {
+					printf("eval statements are unimplemented.\n");
+					exit(-1);
+				}
+				char sl = builder_read_u8(&proc->body, i++);
+				if (sl == SL_DISCARD) {
+					printf("eval output location was discard?\n");
+					exit(-1);
+				}
+				Ref out;
+				if (sl == SL_DEF) {
+					out.variant = REF_VARIABLE;
+					out.ident = program_read_ident(&proc->body, &i);
+				} else if (sl == SL_WRITE) {
+					size_t slen = compile_expr(&proc->body, &i,
+							&temp_count, EXPR_STACK_CAPACITY, stack);
+					if (slen != 1) {
+						printf("lhs of write expression had %d values\n", slen);
+						exit(-1);
+					}
+					out = stack[0];
+				} else {
+					printf("unknown output location code: %d\n", sl);
+					exit(-1);
+				}
+				char sl_last = builder_read_u8(&proc->body, i++);
+				if (sl_last != SL_DISCARD) {
+					printf("eval/rhs was not discard?\n");
+					exit(-1);
+				}
+				size_t slen = compile_expr(&proc->body, &i,
+						&temp_count, EXPR_STACK_CAPACITY, stack);
+				if (slen != 1) {
+					printf("rhs of statement had %d values\n", slen);
+					exit(-1);
+				}
+				Ref val = stack[0];
+				if (sl == SL_DEF) {
+					printf("    ");
+					print_ref(out);
+					printf(" = ");
+					print_ref(val);
+					printf("\n");
+				} else {
+					printf("    store i64 ");
+					print_ref(val);
+					printf(", i64* ");
+					print_ref(out);
+					printf("\n");
+				}
+				break;
+			}
+			case S_LOCAL:
+			{
+				substr ident = builder_read_substr(&proc->body, i);
+				i += sizeof(substr);
+				printf("    %%");
+				fputsubstr(ident, stdout);
+				printf(" = alloca i64\n");
+				break;
+			}
 			case S_RET:
-				; // ??
+			{
 				size_t len = compile_expr(&proc->body, &i,
 						&temp_count, EXPR_STACK_CAPACITY, stack);
 				if (len != 1) {
@@ -835,6 +957,7 @@ void compile(Items items) {
 				print_ref(stack[0]);
 				printf("\n");
 				break;
+			}
 			default:
 				printf("Invalid statement discriminant: %d\n", *builder_get_ptr(&proc->body, i));
 				exit(-1);
@@ -853,8 +976,7 @@ void test() {
 main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
 	local x: b64;\
 	x <- 1;\
-	y := 2;\
-	return *x + y;\
+	return *x + 2;\
 }";
 	fputs("Source:\n", debug);
 	fputs(input, debug);
@@ -928,7 +1050,11 @@ main(argc: b64, argv: *[{ b64, *[b8] }]) -> b64 {\
 
 	fprintf(debug, "Parsing...\n");
 	Items items = parse(tt);
+	fputs("\n", debug);
 	destroy_tt(tt);
+	for (int i = 0; i < items.item_num; i++) {
+		builder_log(&items.items[i].body);
+	}
 
 	fprintf(debug, "Compiling...\n");
 	compile(items);
