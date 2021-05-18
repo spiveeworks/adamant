@@ -58,22 +58,23 @@ struct compound_operators {
 typedef struct token {
     token_id id;
     str substr;
+    s64 val;
 } *Token;
 
 char *read_token(char *stream, Token token) {
     while (*stream != '\0' && IS_WHITESPACE(*stream)) {
         stream++;
     }
-    sxx size = 1;
+    token->val = 0;
     if (IS_ALPHA(*stream)) {
         token->id = TOK_IDENT;
         token->substr.data = stream;
         stream++;
+        token->substr.size = 1;
         while (IS_ALPHANUM(*stream)) {
+            token->substr.size++;
             stream++;
-            size++;
         }
-        token->substr.size = size;
         for (int i = 0; i < ARRAY_SIZE(keywords); i++) {
             if (strlen(keywords[i].word) == token->substr.size
                 && strncmp(keywords[i].word, token->substr.data, token->substr.size) == 0)
@@ -81,6 +82,21 @@ char *read_token(char *stream, Token token) {
                 token->id = keywords[i].id;
                 break;
             }
+        }
+    } else if (IS_NUM(*stream)) {
+        token->id = TOK_NUM;
+        token->substr.data = stream;
+        token->substr.size = 1;
+        token->val = *stream - '0';
+        stream++;
+        while (IS_NUM(*stream)) {
+            token->substr.size++;
+            token->val *= 10;
+            token->val += *stream - '0';
+            stream++;
+        }
+        if (IS_ALPHA(*stream)) {
+            error(1, 0, "Letters are not allowed in numerals");
         }
     } else {
         token->id = (u8)*stream;
@@ -145,12 +161,17 @@ int main(int argc, char **argv) {
     struct token token;
     while (true) {
         stream = read_token(stream, &token);
-        switch (token.id) {
+        switch ((uxx)token.id) {
         case TOK_IDENT:
-            printf("identifier\n");
+            putc('`', stdout);
+            for (s32 i = 0; i < token.substr.size; i++) {
+                putc(token.substr.data[i], stdout);
+            }
+            putc('`', stdout);
+            putc('\n', stdout);
             break;
         case TOK_NUM:
-            printf("number\n");
+            printf("%ld\n", token.val);
             break;
         case TOK_DEFINE:
             printf(":=\n");
@@ -158,10 +179,9 @@ int main(int argc, char **argv) {
         case TOK_FUNC:
             printf("func\n");
             break;
+        case '\0':
+            return 0;
         default:
-            if (token.id == '\0') {
-                return 0;
-            }
             if (IS_PRINTABLE(token.id)) {
                 printf("\'%c\'\n", token.id);
             } else {
@@ -169,4 +189,5 @@ int main(int argc, char **argv) {
             }
         }
     }
+    fflush(stdout);
 }
