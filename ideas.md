@@ -249,3 +249,47 @@ alg f(A: Type) := proc(x: A) -> A { return x; };
 alg g(A: Type) := proc(x: A) := x;
 ```
 
+New Metaprogramming
+===================
+
+Iterating on the above ideas, my current design now looks like this:
+
+- Functions `func` are inlinable bytecode exactly like the `alg`s from above.
+- Procedures `proc` are inlinable bytecode that will also be compiled into
+  linkable machine code in the second pass, just as above.
+- Functions can be declared `static` to prevent them from being inlined into
+  procedures, only other static functions.
+- Macros `macro` are static functions that emit bytecode to be included in a
+  `func` or `proc`.
+
+Then inside a `func` or `proc` one can have `static` and `macro` blocks which
+are allowed to call `static func`s and `macro`s, but can only use static
+values. All locally scoped variables become static `ident` identifiers, which
+can be manipulated through compiler/interpretor APIs/builtins. A static
+function implicitly has a static block for its body, and similar for macros.
+
+Inside `macro` blocks, and maybe after initialising a new function declaration
+in a `static` block, one can access `emit_bytecode` builtins which add
+operations to the relevant bytecode body. This is made easier by the `emit`
+keyword which when applied to blocks or statements will essentially desugar to
+a series of `emit_bytecode` operations. The `emit_bytecode` operation will have
+a corresponding bytecode representation, so that macros can be generated in the
+first pass and run. `macro` blocks, then, are regions of bytecode that will be
+run upon inlining, in order to generate the actual bytecode to be compiled into
+machine code. Unclear whether macro blocks will need to be expanded, and hence
+whether functions will need to be inlined, in the first pass or in the second
+pass.
+
+A `body` keyword might help for defining `func`s using a single macro
+expansion, although `func f() macro {...}` might have the same effect.
+
+Importantly `macro` and `emit` can be chained on single statements for things
+like loop unrolling:
+```
+func f(static n: u32, xs: *[u32 * n]) {
+    macro for i in n emit {
+        xs[i] *= 2;
+    }
+}
+```
+
