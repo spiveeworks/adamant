@@ -25,6 +25,10 @@ typedef struct {
     char *data;
 } str;
 
+/*************/
+/* Tokeniser */
+/*************/
+
 typedef enum {
     /* 0 - 255 represent their ascii equivalents */
     TOK_IDENT = 256,
@@ -115,6 +119,55 @@ char *read_token(char *stream, Token token) {
     return stream;
 }
 
+/***************/
+/* Interpretor */
+/***************/
+
+#define STATIC_VAR_CAP 256
+uxx static_var_count = 0;
+
+struct static_var{
+    str name;
+    s64 val;
+    bool is_const;
+} static_vars[STATIC_VAR_CAP];
+
+char *interpret_statement(char *stream) {
+    struct token token;
+    str varname;
+
+    stream = read_token(stream, &token);
+    if (token.id == '\0') return stream;
+    if (token.id != TOK_IDENT) {
+        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+    }
+    varname = token.substr;
+
+    stream = read_token(stream, &token);
+    if (token.id != TOK_DEFINE) {
+        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+    }
+
+    stream = read_token(stream, &token);
+    if (token.id != TOK_NUM) {
+        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+    }
+    static_vars[static_var_count].name = varname;
+    static_vars[static_var_count].val = token.val;
+    static_var_count += 1;
+
+    stream = read_token(stream, &token);
+    if (token.id != ';') {
+        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+    }
+
+    return stream;
+}
+
+/****************/
+/* Input/Output */
+/****************/
+
 str read_file(char *path) {
     FILE *input = NULL;
     str contents;
@@ -158,36 +211,12 @@ int main(int argc, char **argv) {
     }
 
     char *stream = input.data;
-    struct token token;
-    while (true) {
-        stream = read_token(stream, &token);
-        switch ((uxx)token.id) {
-        case TOK_IDENT:
-            putc('`', stdout);
-            for (s32 i = 0; i < token.substr.size; i++) {
-                putc(token.substr.data[i], stdout);
-            }
-            putc('`', stdout);
-            putc('\n', stdout);
-            break;
-        case TOK_NUM:
-            printf("%ld\n", token.val);
-            break;
-        case TOK_DEFINE:
-            printf(":=\n");
-            break;
-        case TOK_FUNC:
-            printf("func\n");
-            break;
-        case '\0':
-            return 0;
-        default:
-            if (IS_PRINTABLE(token.id)) {
-                printf("\'%c\'\n", token.id);
-            } else {
-                printf("%d\n", token.id);
-            }
-        }
+    while (*stream) {
+        stream = interpret_statement(stream);
     }
-    fflush(stdout);
+    for (uxx i = 0; i < static_var_count; i++) {
+        str varname = static_vars[i].name;
+        char *cstr = strndup(varname.data, varname.size);
+        printf("%s\t:= %ld\n", cstr, static_vars[i].val);
+    }
 }
