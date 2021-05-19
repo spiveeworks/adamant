@@ -119,6 +119,31 @@ char *read_token(char *stream, Token token) {
     return stream;
 }
 
+/****************/
+/* Instructions */
+/****************/
+
+typedef enum {
+    OP_NULL,
+    OP_MOV,
+} opcode;
+
+typedef enum {
+    ARG_VAL,
+    ARG_DEREF,
+    ARG_CONST,
+} op_mode;
+
+struct instruction {
+    opcode opcode;
+    op_mode target_mode;
+    op_mode arg1_mode;
+    op_mode arg2_mode;
+    u64 target;
+    u64 arg1;
+    u64 arg2;
+};
+
 /***************/
 /* Interpretor */
 /***************/
@@ -132,36 +157,96 @@ struct static_var{
     bool is_const;
 } static_vars[STATIC_VAR_CAP];
 
-char *interpret_statement(char *stream) {
+void execute_instruction(struct instruction *instruction) {
+    u64 arg1 = 0;
+    switch (instruction->arg1_mode) {
+    case ARG_VAL:
+        arg1 = static_vars[instruction->arg1].val;
+        break;
+    case ARG_DEREF:
+        /* direct access to the compiler's memory! */
+        arg1 = *(u64*)static_vars[instruction->arg1].val;
+        break;
+    case ARG_CONST:
+        arg1 = instruction->arg1;
+        break;
+    }
+
+    u64 arg2 = 0;
+    switch (instruction->arg2_mode) {
+    case ARG_VAL:
+        arg2 = static_vars[instruction->arg2].val;
+        break;
+    case ARG_DEREF:
+        /* direct access to the compiler's memory! */
+        arg2 = *(u64*)static_vars[instruction->arg2].val;
+        break;
+    case ARG_CONST:
+        arg2 = instruction->arg2;
+        break;
+    }
+
+    u64 result = 0;
+    switch (instruction->opcode) {
+    case OP_NULL:
+        return;
+    case OP_MOV:
+        result = arg1;
+        break;
+    }
+
+    switch (instruction->target_mode) {
+    case ARG_VAL:
+        static_vars[instruction->target].val = result;
+        break;
+    case ARG_DEREF:
+        *(u64*)static_vars[instruction->target].val = result;
+        break;
+    case ARG_CONST:
+        error(1, 0, "instruction had const target mode");
+        break;
+    }
+}
+
+void run(char *stream) {
     struct token token;
-    str varname;
+    struct instruction instruction;
 
-    stream = read_token(stream, &token);
-    if (token.id == '\0') return stream;
-    if (token.id != TOK_IDENT) {
-        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+    while (true) {
+        stream = read_token(stream, &token);
+        if (token.id == '\0') return;
+        if (token.id != TOK_IDENT) {
+            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+        }
+        str varname = token.substr;
+
+        stream = read_token(stream, &token);
+        if (token.id != TOK_DEFINE) {
+            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+        }
+        instruction.target_mode = ARG_VAL;
+        uxx target = static_var_count++;
+        static_vars[target].name = varname;
+        static_vars[target].val = 0;
+        instruction.target = target;
+
+        stream = read_token(stream, &token);
+        if (token.id != TOK_NUM) {
+            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+        }
+        instruction.arg1_mode = ARG_CONST;
+        instruction.arg1 = token.val;
+
+        stream = read_token(stream, &token);
+        if (token.id != ';') {
+            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
+        }
+        instruction.opcode = OP_MOV;
+        instruction.arg2_mode = ARG_CONST;
+        instruction.arg2 = 0;
+
+        execute_instruction(&instruction);
     }
-    varname = token.substr;
-
-    stream = read_token(stream, &token);
-    if (token.id != TOK_DEFINE) {
-        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-    }
-
-    stream = read_token(stream, &token);
-    if (token.id != TOK_NUM) {
-        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-    }
-    static_vars[static_var_count].name = varname;
-    static_vars[static_var_count].val = token.val;
-    static_var_count += 1;
-
-    stream = read_token(stream, &token);
-    if (token.id != ';') {
-        error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-    }
-
-    return stream;
 }
 
 /****************/
@@ -210,10 +295,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    char *stream = input.data;
-    while (*stream) {
-        stream = interpret_statement(stream);
-    }
+    run(input.data);
+
     for (uxx i = 0; i < static_var_count; i++) {
         str varname = static_vars[i].name;
         char *cstr = strndup(varname.data, varname.size);
