@@ -25,6 +25,10 @@ typedef struct {
     char *data;
 } str;
 
+char *cstr(str str) {
+    return strndup(str.data, str.size);
+}
+
 /*************/
 /* Tokeniser */
 /*************/
@@ -34,21 +38,37 @@ typedef enum {
     TOK_IDENT = 256,
     TOK_NUM,
     TOK_DEFINE,
+    TOK_LOGIC_OR,
+    TOK_LOGIC_AND,
+    TOK_EQ,
+    TOK_LEQ,
+    TOK_GEQ,
+    TOK_LSHIFT,
+    TOK_RSHIFT,
     TOK_FUNC
 } token_id;
 
-struct keywords {
+#define COMPOUND_OPERATOR_COUNT 8
+const struct compound_operators {
     token_id id;
     char *word;
-} keywords[1] = {
-    {TOK_FUNC, "func"}
+} compound_operators[COMPOUND_OPERATOR_COUNT] = {
+    {TOK_DEFINE, ":="},
+    {TOK_LOGIC_OR, "||"},
+    {TOK_LOGIC_AND, "&&"},
+    {TOK_EQ, "=="},
+    {TOK_LEQ, "<="},
+    {TOK_GEQ, ">="},
+    {TOK_LSHIFT, "<<"},
+    {TOK_RSHIFT, ">>"}
 };
 
-struct compound_operators {
+#define KEYWORD_COUNT 1
+const struct keywords {
     token_id id;
     char *word;
-} compound_operators[1] = {
-    {TOK_DEFINE, ":="}
+} keywords[KEYWORD_COUNT] = {
+    {TOK_FUNC, "func"}
 };
 
 #define IS_LOWER(c) ('a' <= (c) && (c) <= 'z')
@@ -79,7 +99,7 @@ char *read_token(char *stream, Token token) {
             token->substr.size++;
             stream++;
         }
-        for (int i = 0; i < ARRAY_SIZE(keywords); i++) {
+        for (int i = 0; i < KEYWORD_COUNT; i++) {
             if (strlen(keywords[i].word) == token->substr.size
                 && strncmp(keywords[i].word, token->substr.data, token->substr.size) == 0)
             {
@@ -106,7 +126,7 @@ char *read_token(char *stream, Token token) {
         token->id = (u8)*stream;
         token->substr.size = 1;
         token->substr.data = stream;
-        for (s32 i = 0; i < ARRAY_SIZE(compound_operators); i++) {
+        for (s32 i = 0; i < COMPOUND_OPERATOR_COUNT; i++) {
             uxx size = strlen(compound_operators[i].word);
             if (strncmp(compound_operators[i].word, stream, size) == 0) {
                 token->id = compound_operators[i].id;
@@ -126,9 +146,28 @@ char *read_token(char *stream, Token token) {
 typedef enum {
     OP_NULL,
     OP_MOV,
+    OP_LOGIC_OR,
+    OP_LOGIC_AND,
+    OP_EQ,
+    OP_LEQ,
+    OP_GEQ,
+    OP_LESS,
+    OP_GREATER,
+    OP_OR,
+    OP_XOR,
+    OP_ADD,
+    OP_SUB,
+    OP_AND,
+    OP_LSHIFT,
+    OP_RSHIFT,
+    OP_MUL,
+    OP_DIV,
+    OP_MOD,
+    OP_MEMBER
 } opcode;
 
 typedef enum {
+    ARG_NULL,
     ARG_VAL,
     ARG_DEREF,
     ARG_CONST,
@@ -170,6 +209,9 @@ void execute_instruction(struct instruction *instruction) {
     case ARG_CONST:
         arg1 = instruction->arg1;
         break;
+    case ARG_NULL:
+        error(1, 0, "arg mode not set");
+        break;
     }
 
     u64 arg2 = 0;
@@ -184,6 +226,9 @@ void execute_instruction(struct instruction *instruction) {
     case ARG_CONST:
         arg2 = instruction->arg2;
         break;
+    case ARG_NULL:
+        error(1, 0, "arg mode not set");
+        break;
     }
 
     u64 result = 0;
@@ -192,6 +237,60 @@ void execute_instruction(struct instruction *instruction) {
         return;
     case OP_MOV:
         result = arg1;
+        break;
+    case OP_LOGIC_OR:
+        result = arg1 || arg2;
+        break;
+    case OP_LOGIC_AND:
+        result = arg1 && arg2;
+        break;
+    case OP_EQ:
+        result = arg1 == arg2;
+        break;
+    case OP_LEQ:
+        result = arg1 <= arg2;
+        break;
+    case OP_GEQ:
+        result = arg1 >= arg2;
+        break;
+    case OP_LESS:
+        result = arg1 < arg2;
+        break;
+    case OP_GREATER:
+        result = arg1 > arg2;
+        break;
+    case OP_OR:
+        result = arg1 | arg2;
+        break;
+    case OP_XOR:
+        result = arg1 ^ arg2;
+        break;
+    case OP_ADD:
+        result = arg1 + arg2;
+        break;
+    case OP_SUB:
+        result = arg1 - arg2;
+        break;
+    case OP_AND:
+        result = arg1 & arg2;
+        break;
+    case OP_LSHIFT:
+        result = arg1 << arg2;
+        break;
+    case OP_RSHIFT:
+        result = arg1 >> arg2;
+        break;
+    case OP_MUL:
+        result = arg1 * arg2;
+        break;
+    case OP_DIV:
+        result = arg1 / arg2;
+        break;
+    case OP_MOD:
+        result = arg1 % arg2;
+        break;
+    case OP_MEMBER:
+        error(1, 0, "member operator not yet implemented");
         break;
     }
 
@@ -205,47 +304,233 @@ void execute_instruction(struct instruction *instruction) {
     case ARG_CONST:
         error(1, 0, "instruction had const target mode");
         break;
+    case ARG_NULL:
+        error(1, 0, "arg mode not set");
+        break;
     }
+}
+
+typedef enum {
+    PRECEDENCE_DISJUNCTIVE,
+    PRECEDENCE_CONJUNCTIVE,
+    PRECEDENCE_COMPARATIVE,
+    PRECEDENCE_ADDITIVE,
+    PRECEDENCE_MULTIPLICATIVE,
+    PRECEDENCE_OFFSET
+} precedence_level;
+
+#define PRECEDENCE_COUNT 6
+
+#define OPERATOR_COUNT 19
+const struct {
+    token_id tok;
+    precedence_level precedence;
+    opcode op;
+} operators[OPERATOR_COUNT] = {
+    {TOK_LOGIC_OR, PRECEDENCE_DISJUNCTIVE, OP_LOGIC_OR},
+    {TOK_LOGIC_AND, PRECEDENCE_CONJUNCTIVE, OP_LOGIC_AND},
+    {TOK_EQ, PRECEDENCE_COMPARATIVE, OP_EQ},
+    {TOK_LEQ, PRECEDENCE_COMPARATIVE, OP_LEQ},
+    {TOK_GEQ, PRECEDENCE_COMPARATIVE, OP_GEQ},
+    {'<', PRECEDENCE_COMPARATIVE, OP_LESS},
+    {'>', PRECEDENCE_COMPARATIVE, OP_GREATER},
+    {'|', PRECEDENCE_ADDITIVE, OP_OR},
+    {'^', PRECEDENCE_ADDITIVE, OP_XOR},
+    {'+', PRECEDENCE_ADDITIVE, OP_ADD},
+    {'-', PRECEDENCE_ADDITIVE, OP_SUB},
+    {TOK_LSHIFT, PRECEDENCE_MULTIPLICATIVE, OP_LSHIFT},
+    {TOK_RSHIFT, PRECEDENCE_MULTIPLICATIVE, OP_LSHIFT},
+    {'&', PRECEDENCE_MULTIPLICATIVE, OP_AND},
+    {'*', PRECEDENCE_MULTIPLICATIVE, OP_MUL},
+    {'/', PRECEDENCE_MULTIPLICATIVE, OP_DIV},
+    {'%', PRECEDENCE_MULTIPLICATIVE, OP_MOD},
+    {'.', PRECEDENCE_OFFSET, OP_MEMBER},
+};
+
+struct partial_instruction{
+    bool is_temp;
+    opcode op;
+    op_mode mode;
+    u64 arg;
+};
+
+struct op_stack {
+    op_mode target_mode;
+    u64 target;
+    struct partial_instruction lhs[PRECEDENCE_COUNT];
+    struct partial_instruction rhs;
+    precedence_level next_precedence;
+};
+
+void op_stack_init(struct op_stack *stack) {
+    stack->target_mode = ARG_NULL;
+    stack->target = 0;
+    for (sxx i = 0; i < PRECEDENCE_COUNT; i++) {
+        stack->lhs[i].is_temp = false;
+        stack->lhs[i].op = OP_NULL;
+        stack->lhs[i].mode = ARG_NULL;
+        stack->lhs[i].arg = 0;
+    }
+    stack->rhs.is_temp = false;
+    stack->rhs.mode = ARG_NULL;
+    stack->rhs.arg = 0;
+    stack->rhs.op = OP_NULL;
+    stack->next_precedence = PRECEDENCE_DISJUNCTIVE;
+}
+
+void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
+    for (sxx i = PRECEDENCE_COUNT - 1; i >= stack->next_precedence; i--) {
+        if (stack->lhs[i].op == OP_NULL) continue;
+
+        instruction->opcode = stack->lhs[i].op;
+        instruction->arg1_mode = stack->lhs[i].mode;
+        instruction->arg1 = stack->lhs[i].arg;
+        instruction->arg2_mode = stack->rhs.mode;
+        instruction->arg2 = stack->rhs.arg;
+
+        if (stack->lhs[i].is_temp) {
+            static_var_count--;
+        }
+        if (stack->rhs.is_temp) {
+            static_var_count--;
+        }
+
+        stack->lhs[i].is_temp = false;
+        stack->lhs[i].op = OP_NULL;
+        stack->lhs[i].mode = ARG_NULL;
+        stack->lhs[i].arg = 0;
+
+        if (i == 0 && stack->rhs.op == OP_NULL) {
+            /* finished flushing stack */
+            instruction->target_mode = stack->target_mode;
+            instruction->target = stack->target;
+            stack->target_mode = ARG_NULL;
+            stack->target = 0;
+            stack->rhs.is_temp = false;
+            stack->rhs.mode = ARG_NULL;
+            stack->rhs.arg = 0;
+        } else {
+            /* output a temporary and continue */
+            instruction->target_mode = ARG_VAL;
+            instruction->target = static_var_count;
+            stack->rhs.is_temp = true;
+            stack->rhs.mode = ARG_VAL;
+            stack->rhs.arg = static_var_count;
+            static_var_count++;
+        }
+
+        return;
+    }
+
+    if (stack->rhs.op == OP_NULL) {
+        /* no operations were added, just mov */
+        instruction->opcode = OP_MOV;
+        instruction->target = stack->target;
+        instruction->target_mode = stack->target_mode;
+        instruction->arg1_mode = stack->rhs.mode;
+        instruction->arg1 = stack->rhs.arg;
+        instruction->arg2_mode = ARG_CONST;
+        instruction->arg2 = 0;
+        if (stack->rhs.is_temp) static_var_count--;
+    } else {
+        /* stack has been flushed past desired precedent, push */
+        stack->lhs[stack->next_precedence] = stack->rhs;
+    }
+
+    stack->rhs.is_temp = false;
+    stack->rhs.op = OP_NULL;
+    stack->rhs.mode = ARG_NULL;
+    stack->rhs.arg = 0;
+    stack->next_precedence = 0;
 }
 
 void run(char *stream) {
     struct token token;
     struct instruction instruction;
+    enum {
+        MODE_STATEMENT,
+        MODE_IDENT,
+        MODE_EXPR,
+        MODE_EXPR_FLUSH
+    } mode = MODE_STATEMENT;
+    struct op_stack op_stack;
+    str varname;
+
+    op_stack_init(&op_stack);
 
     while (true) {
-        stream = read_token(stream, &token);
-        if (token.id == '\0') return;
-        if (token.id != TOK_IDENT) {
-            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-        }
-        str varname = token.substr;
+        instruction.opcode = OP_NULL;
 
-        stream = read_token(stream, &token);
-        if (token.id != TOK_DEFINE) {
-            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-        }
-        instruction.target_mode = ARG_VAL;
-        uxx target = static_var_count++;
-        static_vars[target].name = varname;
-        static_vars[target].val = 0;
-        instruction.target = target;
+        switch (mode) {
+        case MODE_STATEMENT:
+            stream = read_token(stream, &token);
+            if (token.id == '\0') return;
+            if (token.id != TOK_IDENT) {
+                error(1, 0, "unexpected token %s", cstr(token.substr));
+            }
+            varname = token.substr;
+            mode = MODE_IDENT;
+            break;
 
-        stream = read_token(stream, &token);
-        if (token.id != TOK_NUM) {
-            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-        }
-        instruction.arg1_mode = ARG_CONST;
-        instruction.arg1 = token.val;
+        case MODE_IDENT:
+            stream = read_token(stream, &token);
+            if (token.id != TOK_DEFINE) {
+                error(1, 0, "unexpected token %s", cstr(token.substr));
+            }
+            static_vars[static_var_count].name = varname;
+            static_vars[static_var_count].val = 0;
+            op_stack.target = static_var_count;
+            op_stack.target_mode = ARG_VAL;
+            static_var_count++;
+            mode = MODE_EXPR;
+            break;
 
-        stream = read_token(stream, &token);
-        if (token.id != ';') {
-            error(1, 0, "unexpected token %s", strndup(token.substr.data, token.substr.size));
-        }
-        instruction.opcode = OP_MOV;
-        instruction.arg2_mode = ARG_CONST;
-        instruction.arg2 = 0;
+        case MODE_EXPR:
+            if (op_stack.rhs.op != OP_NULL) {
+                op_stack_step(&op_stack, &instruction);
+                break;
+            }
+            stream = read_token(stream, &token);
+            if (op_stack.rhs.mode == ARG_NULL) {
+                switch (token.id) {
+                case TOK_NUM:
+                    op_stack.rhs.is_temp = false;
+                    op_stack.rhs.mode = ARG_CONST;
+                    op_stack.rhs.arg = token.val;
+                    break;
+                default:
+                    error(1, 0, "expected number, got \"%s\"", cstr(token.substr));
+                    break;
+                }
+            } else if (token.id == ';') {
+                mode = MODE_EXPR_FLUSH;
+            } else {
+                bool found = false;
+                for (uxx i = 0; i < OPERATOR_COUNT; i++) {
+                    if (token.id != operators[i].tok) continue;
 
-        execute_instruction(&instruction);
+                    found = true;
+                    op_stack.rhs.op = operators[i].op;
+                    op_stack.next_precedence = operators[i].precedence;
+                    break;
+                }
+                if (!found) {
+                    error(1, 0, "expected binary operator or ';', got \"%s\"", cstr(token.substr));
+                }
+            }
+            break;
+        case MODE_EXPR_FLUSH:
+            op_stack_step(&op_stack, &instruction);
+            if (op_stack.rhs.mode == ARG_NULL) {
+                mode = MODE_STATEMENT;
+            }
+            break;
+        default:
+            error(1, 0, "parse state corrupted");
+            break;
+        }
+
+        if (instruction.opcode != OP_NULL) execute_instruction(&instruction);
     }
 }
 
