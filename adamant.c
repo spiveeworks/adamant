@@ -46,6 +46,7 @@ typedef enum {
     TOK_LOGIC_OR,
     TOK_LOGIC_AND,
     TOK_EQ,
+    TOK_NEQ,
     TOK_LEQ,
     TOK_GEQ,
     TOK_LSHIFT,
@@ -54,7 +55,7 @@ typedef enum {
     TOK_FUNC
 } token_id;
 
-#define COMPOUND_OPERATOR_COUNT 8
+#define COMPOUND_OPERATOR_COUNT 9
 const struct compound_operators {
     token_id id;
     char *word;
@@ -63,6 +64,7 @@ const struct compound_operators {
     {TOK_LOGIC_OR, "||"},
     {TOK_LOGIC_AND, "&&"},
     {TOK_EQ, "=="},
+    {TOK_NEQ, "!="},
     {TOK_LEQ, "<="},
     {TOK_GEQ, ">="},
     {TOK_LSHIFT, "<<"},
@@ -156,6 +158,7 @@ typedef enum {
     OP_LOGIC_OR,
     OP_LOGIC_AND,
     OP_EQ,
+    OP_NEQ,
     OP_LEQ,
     OP_GEQ,
     OP_LESS,
@@ -170,6 +173,9 @@ typedef enum {
     OP_MUL,
     OP_DIV,
     OP_MOD,
+    OP_LOGIC_NOT,
+    OP_NOT,
+    OP_NEG,
     OP_MEMBER
 } opcode;
 
@@ -254,6 +260,9 @@ void execute_instruction(struct instruction *instruction) {
     case OP_EQ:
         result = arg1 == arg2;
         break;
+    case OP_NEQ:
+        result = arg1 != arg2;
+        break;
     case OP_LEQ:
         result = arg1 <= arg2;
         break;
@@ -296,9 +305,19 @@ void execute_instruction(struct instruction *instruction) {
     case OP_MOD:
         result = arg1 % arg2;
         break;
+    case OP_LOGIC_NOT:
+        result = !arg1;
+        break;
+    case OP_NOT:
+        result = ~arg1;
+        break;
+    case OP_NEG:
+        result = -arg1;
+        break;
     case OP_MEMBER:
         error(1, 0, "member operator not yet implemented");
-        break;
+    default:
+        error(1, 0, "undefined/unimplemented opcode %d", instruction->opcode);
     }
 
     switch (instruction->target_mode) {
@@ -318,11 +337,13 @@ void execute_instruction(struct instruction *instruction) {
 }
 
 typedef enum {
+    PRECEDENCE_GROUPING,
     PRECEDENCE_DISJUNCTIVE,
     PRECEDENCE_CONJUNCTIVE,
     PRECEDENCE_COMPARATIVE,
     PRECEDENCE_ADDITIVE,
     PRECEDENCE_MULTIPLICATIVE,
+    PRECEDENCE_UNARY,
     PRECEDENCE_OFFSET
 } precedence_level;
 
@@ -337,6 +358,7 @@ const struct {
     {TOK_LOGIC_OR, PRECEDENCE_DISJUNCTIVE, OP_LOGIC_OR},
     {TOK_LOGIC_AND, PRECEDENCE_CONJUNCTIVE, OP_LOGIC_AND},
     {TOK_EQ, PRECEDENCE_COMPARATIVE, OP_EQ},
+    {TOK_NEQ, PRECEDENCE_COMPARATIVE, OP_NEQ},
     {TOK_LEQ, PRECEDENCE_COMPARATIVE, OP_LEQ},
     {TOK_GEQ, PRECEDENCE_COMPARATIVE, OP_GEQ},
     {'<', PRECEDENCE_COMPARATIVE, OP_LESS},
@@ -372,17 +394,35 @@ struct op_stack {
     struct partial_instruction rhs;
 };
 
-void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
-    if (stack->lhs_count > 0 && stack->lhs[stack->lhs_count - 1].precedence >= stack->rhs.precedence) {
+bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
+    bool empty = stack->lhs_count == 0;
+    bool rhs_noop = stack->rhs.op == OP_NULL;
+    bool lhs_noop = empty || stack->lhs[stack->lhs_count - 1].op == OP_NULL;
+    bool lhs_flush = !empty && stack->lhs[stack->lhs_count - 1].precedence
+        >= stack->rhs.precedence;
+    if (lhs_noop && rhs_noop && lhs_flush) {
+        stack->lhs_count--;
+        return false;
+    } else if (!lhs_noop && lhs_flush) {
+        /* TODO: track parentheses vs semicolons, make sure they match up
+           correctly */
         stack->lhs_count--;
 
-        instruction->opcode = stack->lhs[stack->lhs_count].op;
-        instruction->arg1_mode = stack->lhs[stack->lhs_count].mode;
-        instruction->arg1 = stack->lhs[stack->lhs_count].arg;
-        instruction->arg2_mode = stack->rhs.mode;
-        instruction->arg2 = stack->rhs.arg;
+        uxx i = stack->lhs_count;
+        instruction->opcode = stack->lhs[i].op;
+        if (stack->lhs[i].mode == ARG_NULL) {
+            instruction->arg1_mode = stack->rhs.mode;
+            instruction->arg1 = stack->rhs.arg;
+            instruction->arg2_mode = ARG_CONST;
+            instruction->arg2 = 0;
+        } else {
+            instruction->arg1_mode = stack->lhs[i].mode;
+            instruction->arg1 = stack->lhs[i].arg;
+            instruction->arg2_mode = stack->rhs.mode;
+            instruction->arg2 = stack->rhs.arg;
+        }
 
-        if (stack->lhs[stack->lhs_count].is_temp) {
+        if (stack->lhs[i].is_temp) {
             static_var_count--;
         }
         if (stack->rhs.is_temp) {
@@ -405,6 +445,7 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
             stack->rhs.arg = static_var_count;
             static_var_count++;
         }
+        return true;
     } else if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
         /* no operations were added, just mov */
         instruction->opcode = OP_MOV;
@@ -418,6 +459,7 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         stack->target_mode = 0;
         stack->target = 0;
         stack->rhs = (struct partial_instruction){};
+        return true;
     } else {
         /* stack has been flushed past desired precedence level, push */
         if (stack->lhs_count >= OP_STACK_CAP) {
@@ -426,7 +468,28 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         stack->lhs[stack->lhs_count] = stack->rhs;
         stack->lhs_count += 1;
         stack->rhs = (struct partial_instruction){};
+        return false;
     }
+}
+
+void op_stack_push_unary(
+    struct op_stack *stack,
+    opcode op,
+    precedence_level precedence
+) {
+    if (stack->lhs_count >= OP_STACK_CAP) {
+        error(1, 0, "too many nested expressions");
+    }
+    if (stack->rhs.mode != ARG_NULL) {
+        error(1, 0, "pushed unary operator before RHS was resolved");
+    }
+    uxx i = stack->lhs_count;
+    stack->lhs[i].is_temp = false;
+    stack->lhs[i].mode = ARG_NULL;
+    stack->lhs[i].arg = 0;
+    stack->lhs[i].op = op;
+    stack->lhs[i].precedence = precedence;
+    stack->lhs_count += 1;
 }
 
 void run(char *stream) {
@@ -438,12 +501,14 @@ void run(char *stream) {
         MODE_IDENT,
         MODE_EXPR,
         MODE_OPERATOR,
-        MODE_EXPR_FLUSH,
+        MODE_EXPR_FLUSH_OP,
+        MODE_EXPR_FLUSH_PAREN,
         MODE_EXPR_FLUSH_FINAL
     } mode = MODE_INIT;
     struct op_stack op_stack;
     str varname;
     bool is_var_decl;
+    bool op_stack_result;
 
     memset(&op_stack, 0, sizeof(struct op_stack));
 
@@ -530,13 +595,20 @@ void run(char *stream) {
                 mode = MODE_OPERATOR;
                 break;
             case '(':
-                error(1, 0, "NYI");
+                op_stack_push_unary(&op_stack, OP_NULL, PRECEDENCE_GROUPING);
+                break;
+            case '!':
+                op_stack_push_unary(&op_stack, OP_LOGIC_NOT, PRECEDENCE_UNARY);
                 break;
             case '-':
-                error(1, 0, "NYI");
+                /* TODO check and forbid strange expressions like x * -y */
+                op_stack_push_unary(&op_stack, OP_NEG, PRECEDENCE_UNARY);
                 break;
             case '~':
-                error(1, 0, "NYI");
+                op_stack_push_unary(&op_stack, OP_NOT, PRECEDENCE_UNARY);
+                break;
+            case '+':
+                /* this no-op is nice for emphasising sign conventions */
                 break;
             default:
                 error(1, 0, "expected expression, got \"%s\"", cstr(token.substr));
@@ -546,7 +618,11 @@ void run(char *stream) {
 
         case MODE_OPERATOR:
             stream = read_token(stream, &token);
-            if (token.id == ';') {
+            if (token.id == ')') {
+                op_stack.rhs.op = OP_NULL;
+                op_stack.rhs.precedence = PRECEDENCE_GROUPING;
+                mode = MODE_EXPR_FLUSH_PAREN;
+            } else if (token.id == ';') {
                 mode = MODE_EXPR_FLUSH_FINAL;
             } else {
                 bool found = false;
@@ -556,18 +632,24 @@ void run(char *stream) {
                     found = true;
                     op_stack.rhs.op = operators[i].op;
                     op_stack.rhs.precedence = operators[i].precedence;
+                    mode = MODE_EXPR_FLUSH_OP;
                     break;
                 }
                 if (!found) {
                     error(1, 0, "expected binary operator or ';', got \"%s\"", cstr(token.substr));
                 }
-                mode = MODE_EXPR_FLUSH;
             }
             break;
-        case MODE_EXPR_FLUSH:
+        case MODE_EXPR_FLUSH_OP:
             op_stack_step(&op_stack, &instruction);
             if (op_stack.rhs.mode == ARG_NULL) {
                 mode = MODE_EXPR;
+            }
+            break;
+        case MODE_EXPR_FLUSH_PAREN:
+            op_stack_result = op_stack_step(&op_stack, &instruction);
+            if (!op_stack_result) {
+                mode = MODE_OPERATOR;
             }
             break;
         case MODE_EXPR_FLUSH_FINAL:
