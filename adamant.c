@@ -362,20 +362,42 @@ struct op_stack {
     precedence_level next_precedence;
 };
 
-void op_stack_init(struct op_stack *stack) {
-    stack->target_mode = ARG_NULL;
-    stack->target = 0;
-    for (sxx i = 0; i < PRECEDENCE_COUNT; i++) {
-        stack->lhs[i].is_temp = false;
-        stack->lhs[i].op = OP_NULL;
-        stack->lhs[i].mode = ARG_NULL;
-        stack->lhs[i].arg = 0;
+void op_stack_check(struct op_stack *stack) {
+    if (stack->target_mode != ARG_NULL) {
+        error(0, 0, "warning: stack target mode was not null");
     }
-    stack->rhs.is_temp = false;
-    stack->rhs.mode = ARG_NULL;
-    stack->rhs.arg = 0;
-    stack->rhs.op = OP_NULL;
-    stack->next_precedence = PRECEDENCE_DISJUNCTIVE;
+    if (stack->target != 0) {
+        error(0, 0, "warning: stack target val was not null");
+    }
+    for (sxx i = 0; i < PRECEDENCE_COUNT; i++) {
+        if (stack->lhs[i].is_temp != false) {
+            error(0, 0, "warning: stack flag %ld was not null", i);
+        }
+        if (stack->lhs[i].op != OP_NULL) {
+            error(0, 0, "warning: stack op %ld was not null", i);
+        }
+        if (stack->lhs[i].mode != ARG_NULL) {
+            error(0, 0, "warning: stack mode %ld was not null", i);
+        }
+        if (stack->lhs[i].arg != 0) {
+            error(0, 0, "warning: stack val %ld was not null", i);
+        }
+    }
+    if (stack->rhs.is_temp != false) {
+        error(0, 0, "warning: stack top flag was not null");
+    }
+    if (stack->rhs.mode != ARG_NULL) {
+        error(0, 0, "warning: stack top mode was not null");
+    }
+    if (stack->rhs.arg != 0) {
+        error(0, 0, "warning: stack top val was not null");
+    }
+    if (stack->rhs.op != OP_NULL) {
+        error(0, 0, "warning: stack top op was not null");
+    }
+    if (stack->next_precedence != PRECEDENCE_DISJUNCTIVE) {
+        error(0, 0, "warning: stack precedence was not null");
+    }
 }
 
 void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
@@ -400,7 +422,17 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         stack->lhs[i].mode = ARG_NULL;
         stack->lhs[i].arg = 0;
 
-        if (i == 0 && stack->rhs.op == OP_NULL) {
+        bool stack_empty = false;
+        if (stack->rhs.op == OP_NULL) {
+            stack_empty = true;
+            for (sxx j = i - 1; j >= 0; j--) {
+                if (stack->lhs[j].op != OP_NULL) {
+                    stack_empty = false;
+                }
+            }
+        }
+
+        if (stack_empty) {
             /* finished flushing stack */
             instruction->target_mode = stack->target_mode;
             instruction->target = stack->target;
@@ -409,6 +441,7 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
             stack->rhs.is_temp = false;
             stack->rhs.mode = ARG_NULL;
             stack->rhs.arg = 0;
+            stack->next_precedence = 0;
         } else {
             /* output a temporary and continue */
             instruction->target_mode = ARG_VAL;
@@ -432,8 +465,10 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         instruction->arg2_mode = ARG_CONST;
         instruction->arg2 = 0;
         if (stack->rhs.is_temp) static_var_count--;
+        stack->target_mode = 0;
+        stack->target = 0;
     } else {
-        /* stack has been flushed past desired precedent, push */
+        /* stack has been flushed past desired precedence level, push */
         stack->lhs[stack->next_precedence] = stack->rhs;
     }
 
@@ -448,28 +483,39 @@ void run(char *stream) {
     struct token token;
     struct instruction instruction;
     enum {
+        MODE_INIT,
         MODE_STATEMENT,
         MODE_IDENT,
         MODE_EXPR,
-        MODE_EXPR_FLUSH
-    } mode = MODE_STATEMENT;
+        MODE_OPERATOR,
+        MODE_EXPR_FLUSH,
+        MODE_EXPR_FLUSH_FINAL
+    } mode = MODE_INIT;
     struct op_stack op_stack;
     str varname;
 
-    op_stack_init(&op_stack);
+    memset(&op_stack, 0, sizeof(struct op_stack));
 
     while (true) {
         instruction.opcode = OP_NULL;
 
         switch (mode) {
+        case MODE_INIT:
+            op_stack_check(&op_stack);
+            mode = MODE_STATEMENT;
+            break;
         case MODE_STATEMENT:
             stream = read_token(stream, &token);
-            if (token.id == '\0') return;
-            if (token.id != TOK_IDENT) {
-                error(1, 0, "unexpected token %s", cstr(token.substr));
+            switch (token.id) {
+            case '\0':
+                return;
+            case TOK_IDENT:
+                varname = token.substr;
+                mode = MODE_IDENT;
+                break;
+            default:
+                error(1, 0, "currently only assignment/declaration statements are supported");
             }
-            varname = token.substr;
-            mode = MODE_IDENT;
             break;
 
         case MODE_IDENT:
@@ -486,24 +532,27 @@ void run(char *stream) {
             break;
 
         case MODE_EXPR:
-            if (op_stack.rhs.op != OP_NULL) {
-                op_stack_step(&op_stack, &instruction);
-                break;
+            if (op_stack.rhs.mode != ARG_NULL) {
+                error(1, 0, "parse state error");
             }
             stream = read_token(stream, &token);
-            if (op_stack.rhs.mode == ARG_NULL) {
-                switch (token.id) {
-                case TOK_NUM:
-                    op_stack.rhs.is_temp = false;
-                    op_stack.rhs.mode = ARG_CONST;
-                    op_stack.rhs.arg = token.val;
-                    break;
-                default:
-                    error(1, 0, "expected number, got \"%s\"", cstr(token.substr));
-                    break;
-                }
-            } else if (token.id == ';') {
-                mode = MODE_EXPR_FLUSH;
+            switch (token.id) {
+            case TOK_NUM:
+                op_stack.rhs.is_temp = false;
+                op_stack.rhs.mode = ARG_CONST;
+                op_stack.rhs.arg = token.val;
+                break;
+            default:
+                error(1, 0, "expected number, got \"%s\"", cstr(token.substr));
+                break;
+            }
+            mode = MODE_OPERATOR;
+            break;
+
+        case MODE_OPERATOR:
+            stream = read_token(stream, &token);
+            if (token.id == ';') {
+                mode = MODE_EXPR_FLUSH_FINAL;
             } else {
                 bool found = false;
                 for (uxx i = 0; i < OPERATOR_COUNT; i++) {
@@ -517,12 +566,19 @@ void run(char *stream) {
                 if (!found) {
                     error(1, 0, "expected binary operator or ';', got \"%s\"", cstr(token.substr));
                 }
+                mode = MODE_EXPR_FLUSH;
             }
             break;
         case MODE_EXPR_FLUSH:
             op_stack_step(&op_stack, &instruction);
             if (op_stack.rhs.mode == ARG_NULL) {
-                mode = MODE_STATEMENT;
+                mode = MODE_EXPR;
+            }
+            break;
+        case MODE_EXPR_FLUSH_FINAL:
+            op_stack_step(&op_stack, &instruction);
+            if (op_stack.rhs.mode == ARG_NULL) {
+                mode = MODE_INIT;
             }
             break;
         default:
