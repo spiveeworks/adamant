@@ -359,96 +359,43 @@ struct partial_instruction{
     opcode op;
     op_mode mode;
     u64 arg;
+    precedence_level precedence;
 };
+
+#define OP_STACK_CAP 16
 
 struct op_stack {
     op_mode target_mode;
     u64 target;
-    struct partial_instruction lhs[PRECEDENCE_COUNT];
+    sxx lhs_count;
+    struct partial_instruction lhs[OP_STACK_CAP];
     struct partial_instruction rhs;
-    precedence_level next_precedence;
 };
 
-void op_stack_check(struct op_stack *stack) {
-    if (stack->target_mode != ARG_NULL) {
-        error(0, 0, "warning: stack target mode was not null");
-    }
-    if (stack->target != 0) {
-        error(0, 0, "warning: stack target val was not null");
-    }
-    for (sxx i = 0; i < PRECEDENCE_COUNT; i++) {
-        if (stack->lhs[i].is_temp != false) {
-            error(0, 0, "warning: stack flag %ld was not null", i);
-        }
-        if (stack->lhs[i].op != OP_NULL) {
-            error(0, 0, "warning: stack op %ld was not null", i);
-        }
-        if (stack->lhs[i].mode != ARG_NULL) {
-            error(0, 0, "warning: stack mode %ld was not null", i);
-        }
-        if (stack->lhs[i].arg != 0) {
-            error(0, 0, "warning: stack val %ld was not null", i);
-        }
-    }
-    if (stack->rhs.is_temp != false) {
-        error(0, 0, "warning: stack top flag was not null");
-    }
-    if (stack->rhs.mode != ARG_NULL) {
-        error(0, 0, "warning: stack top mode was not null");
-    }
-    if (stack->rhs.arg != 0) {
-        error(0, 0, "warning: stack top val was not null");
-    }
-    if (stack->rhs.op != OP_NULL) {
-        error(0, 0, "warning: stack top op was not null");
-    }
-    if (stack->next_precedence != PRECEDENCE_DISJUNCTIVE) {
-        error(0, 0, "warning: stack precedence was not null");
-    }
-}
-
 void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
-    for (sxx i = PRECEDENCE_COUNT - 1; i >= stack->next_precedence; i--) {
-        if (stack->lhs[i].op == OP_NULL) continue;
+    if (stack->lhs_count > 0 && stack->lhs[stack->lhs_count - 1].precedence >= stack->rhs.precedence) {
+        stack->lhs_count--;
 
-        instruction->opcode = stack->lhs[i].op;
-        instruction->arg1_mode = stack->lhs[i].mode;
-        instruction->arg1 = stack->lhs[i].arg;
+        instruction->opcode = stack->lhs[stack->lhs_count].op;
+        instruction->arg1_mode = stack->lhs[stack->lhs_count].mode;
+        instruction->arg1 = stack->lhs[stack->lhs_count].arg;
         instruction->arg2_mode = stack->rhs.mode;
         instruction->arg2 = stack->rhs.arg;
 
-        if (stack->lhs[i].is_temp) {
+        if (stack->lhs[stack->lhs_count].is_temp) {
             static_var_count--;
         }
         if (stack->rhs.is_temp) {
             static_var_count--;
         }
 
-        stack->lhs[i].is_temp = false;
-        stack->lhs[i].op = OP_NULL;
-        stack->lhs[i].mode = ARG_NULL;
-        stack->lhs[i].arg = 0;
-
-        bool stack_empty = false;
-        if (stack->rhs.op == OP_NULL) {
-            stack_empty = true;
-            for (sxx j = i - 1; j >= 0; j--) {
-                if (stack->lhs[j].op != OP_NULL) {
-                    stack_empty = false;
-                }
-            }
-        }
-
-        if (stack_empty) {
+        if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
             /* finished flushing stack */
             instruction->target_mode = stack->target_mode;
             instruction->target = stack->target;
             stack->target_mode = ARG_NULL;
             stack->target = 0;
-            stack->rhs.is_temp = false;
-            stack->rhs.mode = ARG_NULL;
-            stack->rhs.arg = 0;
-            stack->next_precedence = 0;
+            stack->rhs = (struct partial_instruction){};
         } else {
             /* output a temporary and continue */
             instruction->target_mode = ARG_VAL;
@@ -458,11 +405,7 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
             stack->rhs.arg = static_var_count;
             static_var_count++;
         }
-
-        return;
-    }
-
-    if (stack->rhs.op == OP_NULL) {
+    } else if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
         /* no operations were added, just mov */
         instruction->opcode = OP_MOV;
         instruction->target = stack->target;
@@ -474,16 +417,16 @@ void op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         if (stack->rhs.is_temp) static_var_count--;
         stack->target_mode = 0;
         stack->target = 0;
+        stack->rhs = (struct partial_instruction){};
     } else {
         /* stack has been flushed past desired precedence level, push */
-        stack->lhs[stack->next_precedence] = stack->rhs;
+        if (stack->lhs_count >= OP_STACK_CAP) {
+            error(1, 0, "too many nested expressions");
+        }
+        stack->lhs[stack->lhs_count] = stack->rhs;
+        stack->lhs_count += 1;
+        stack->rhs = (struct partial_instruction){};
     }
-
-    stack->rhs.is_temp = false;
-    stack->rhs.op = OP_NULL;
-    stack->rhs.mode = ARG_NULL;
-    stack->rhs.arg = 0;
-    stack->next_precedence = 0;
 }
 
 void run(char *stream) {
@@ -509,7 +452,9 @@ void run(char *stream) {
 
         switch (mode) {
         case MODE_INIT:
-            op_stack_check(&op_stack);
+            if (op_stack.lhs_count != 0) {
+                error(1, 0, "op stack was not empty at start of statement");
+            }
             is_var_decl = false;
             mode = MODE_STATEMENT;
             break;
@@ -569,6 +514,7 @@ void run(char *stream) {
                 op_stack.rhs.is_temp = false;
                 op_stack.rhs.mode = ARG_CONST;
                 op_stack.rhs.arg = token.val;
+                mode = MODE_OPERATOR;
                 break;
             case TOK_IDENT:
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
@@ -581,13 +527,21 @@ void run(char *stream) {
                     error(1, 0, "undefined identifier '%s'", cstr(token.substr));
                 }
                 varname = token.substr;
-                mode = MODE_IDENT;
+                mode = MODE_OPERATOR;
+                break;
+            case '(':
+                error(1, 0, "NYI");
+                break;
+            case '-':
+                error(1, 0, "NYI");
+                break;
+            case '~':
+                error(1, 0, "NYI");
                 break;
             default:
-                error(1, 0, "expected number, got \"%s\"", cstr(token.substr));
+                error(1, 0, "expected expression, got \"%s\"", cstr(token.substr));
                 break;
             }
-            mode = MODE_OPERATOR;
             break;
 
         case MODE_OPERATOR:
@@ -601,7 +555,7 @@ void run(char *stream) {
 
                     found = true;
                     op_stack.rhs.op = operators[i].op;
-                    op_stack.next_precedence = operators[i].precedence;
+                    op_stack.rhs.precedence = operators[i].precedence;
                     break;
                 }
                 if (!found) {
