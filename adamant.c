@@ -29,6 +29,11 @@ char *cstr(str str) {
     return strndup(str.data, str.size);
 }
 
+bool str_eq(str a, str b) {
+    if (a.size != b.size) return false;
+    return strncmp(a.data, b.data, a.size) == 0;
+}
+
 /*************/
 /* Tokeniser */
 /*************/
@@ -45,6 +50,7 @@ typedef enum {
     TOK_GEQ,
     TOK_LSHIFT,
     TOK_RSHIFT,
+    TOK_VAR,
     TOK_FUNC
 } token_id;
 
@@ -63,11 +69,12 @@ const struct compound_operators {
     {TOK_RSHIFT, ">>"}
 };
 
-#define KEYWORD_COUNT 1
+#define KEYWORD_COUNT 2
 const struct keywords {
     token_id id;
     char *word;
 } keywords[KEYWORD_COUNT] = {
+    {TOK_VAR, "var"},
     {TOK_FUNC, "func"}
 };
 
@@ -493,6 +500,7 @@ void run(char *stream) {
     } mode = MODE_INIT;
     struct op_stack op_stack;
     str varname;
+    bool is_var_decl;
 
     memset(&op_stack, 0, sizeof(struct op_stack));
 
@@ -502,6 +510,7 @@ void run(char *stream) {
         switch (mode) {
         case MODE_INIT:
             op_stack_check(&op_stack);
+            is_var_decl = false;
             mode = MODE_STATEMENT;
             break;
         case MODE_STATEMENT:
@@ -513,6 +522,12 @@ void run(char *stream) {
                 varname = token.substr;
                 mode = MODE_IDENT;
                 break;
+            case TOK_VAR:
+                if (is_var_decl) {
+                    error(1, 0, "repeated \"var\" keyword");
+                }
+                is_var_decl = true;
+                break;
             default:
                 error(1, 0, "currently only assignment/declaration statements are supported");
             }
@@ -520,14 +535,27 @@ void run(char *stream) {
 
         case MODE_IDENT:
             stream = read_token(stream, &token);
-            if (token.id != TOK_DEFINE) {
-                error(1, 0, "unexpected token %s", cstr(token.substr));
+            if (token.id != TOK_DEFINE && token.id != '=') {
+                error(1, 0, "expected '=' or ':=', got \"%s\"", cstr(token.substr));
             }
-            static_vars[static_var_count].name = varname;
-            static_vars[static_var_count].val = 0;
-            op_stack.target = static_var_count;
-            op_stack.target_mode = ARG_VAL;
-            static_var_count++;
+            if (token.id == TOK_DEFINE || is_var_decl) {
+                static_vars[static_var_count].name = varname;
+                static_vars[static_var_count].val = 0;
+                static_vars[static_var_count].is_const = !is_var_decl;
+                op_stack.target = static_var_count;
+                op_stack.target_mode = ARG_VAL;
+                static_var_count++;
+            } else {
+                for (sxx i = static_var_count - 1; i >= 0; i--) {
+                    if (str_eq(varname, static_vars[i].name)) {
+                        op_stack.target = i;
+                        op_stack.target_mode = ARG_VAL;
+                    }
+                }
+                if (op_stack.target_mode == ARG_NULL) {
+                    error(1, 0, "undefined identifier '%s'", cstr(varname));
+                }
+            }
             mode = MODE_EXPR;
             break;
 
@@ -541,6 +569,19 @@ void run(char *stream) {
                 op_stack.rhs.is_temp = false;
                 op_stack.rhs.mode = ARG_CONST;
                 op_stack.rhs.arg = token.val;
+                break;
+            case TOK_IDENT:
+                for (sxx i = static_var_count - 1; i >= 0; i--) {
+                    if (str_eq(token.substr, static_vars[i].name)) {
+                        op_stack.rhs.arg = i;
+                        op_stack.rhs.mode = ARG_VAL;
+                    }
+                }
+                if (op_stack.rhs.mode == ARG_NULL) {
+                    error(1, 0, "undefined identifier '%s'", cstr(token.substr));
+                }
+                varname = token.substr;
+                mode = MODE_IDENT;
                 break;
             default:
                 error(1, 0, "expected number, got \"%s\"", cstr(token.substr));
@@ -641,6 +682,7 @@ int main(int argc, char **argv) {
     for (uxx i = 0; i < static_var_count; i++) {
         str varname = static_vars[i].name;
         char *cstr = strndup(varname.data, varname.size);
-        printf("%s\t:= %ld\n", cstr, static_vars[i].val);
+        char *assign = static_vars[i].is_const ? ":=" : "=";
+        printf("%s %s %ld\n", cstr, assign, static_vars[i].val);
     }
 }
