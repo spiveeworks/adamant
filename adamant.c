@@ -379,7 +379,6 @@ const struct {
 };
 
 struct partial_instruction{
-    bool is_temp;
     opcode op;
     struct ref arg;
     precedence_level precedence;
@@ -388,6 +387,7 @@ struct partial_instruction{
 #define OP_STACK_CAP 16
 
 struct op_stack {
+    uxx prev_var_count;
     struct ref target;
     sxx lhs_count;
     struct partial_instruction lhs[OP_STACK_CAP];
@@ -419,12 +419,10 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
             instruction->arg2 = stack->rhs.arg;
         }
 
-        if (stack->lhs[i].is_temp) {
-            static_var_count--;
-        }
-        if (stack->rhs.is_temp) {
-            static_var_count--;
-        }
+        if (stack->rhs.arg.mode == ARG_VAL
+            && stack->rhs.arg.id >= stack->prev_var_count) static_var_count--;
+        if (stack->lhs[i].arg.mode == ARG_VAL
+            && stack->lhs[i].arg.id >= stack->prev_var_count) static_var_count--;
 
         if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
             /* finished flushing stack */
@@ -435,7 +433,6 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
             /* output a temporary and continue */
             instruction->target.mode = ARG_VAL;
             instruction->target.id = static_var_count;
-            stack->rhs.is_temp = true;
             stack->rhs.arg.mode = ARG_VAL;
             stack->rhs.arg.id = static_var_count;
             static_var_count++;
@@ -448,7 +445,8 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         instruction->arg1 = stack->rhs.arg;
         instruction->arg2.mode = ARG_CONST;
         instruction->arg2.id = 0;
-        if (stack->rhs.is_temp) static_var_count--;
+        if (stack->rhs.arg.mode == ARG_VAL
+            && stack->rhs.arg.id >= stack->prev_var_count) static_var_count--;
         stack->target.mode = 0;
         stack->target.id = 0;
         stack->rhs = (struct partial_instruction){};
@@ -477,7 +475,6 @@ void op_stack_push_unary(
         error(1, 0, "pushed unary operator before RHS was resolved");
     }
     uxx i = stack->lhs_count;
-    stack->lhs[i].is_temp = false;
     stack->lhs[i].arg.mode = ARG_NULL;
     stack->lhs[i].arg.id = 0;
     stack->lhs[i].op = op;
@@ -559,6 +556,7 @@ void run(char *stream) {
                     error(1, 0, "undefined identifier '%s'", cstr(varname));
                 }
             }
+            op_stack.prev_var_count = static_var_count;
             mode = MODE_EXPR;
             break;
 
@@ -569,7 +567,6 @@ void run(char *stream) {
             stream = read_token(stream, &token);
             switch (token.id) {
             case TOK_NUM:
-                op_stack.rhs.is_temp = false;
                 op_stack.rhs.arg.mode = ARG_CONST;
                 op_stack.rhs.arg.id = token.val;
                 mode = MODE_OPERATOR;
