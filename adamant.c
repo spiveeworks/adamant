@@ -1,9 +1,10 @@
+#include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <error.h>
 #include <errno.h>
+#include <assert.h>
 #include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <stdbool.h>
 
 #define ARRAY_SIZE(x) (sizeof (x) / sizeof *(x))
@@ -388,17 +389,31 @@ struct partial_instruction{
 
 struct op_stack {
     uxx prev_var_count;
-    struct ref target;
     sxx lhs_count;
     struct partial_instruction lhs[OP_STACK_CAP];
-    struct partial_instruction rhs;
 };
+
+bool op_stack_can_push(struct op_stack *stack, precedence_level precedence) {
+    return stack->lhs_count == 0 ||
+        stack->lhs[stack->lhs_count - 1].precedence < precedence;
+}
+
+bool op_stack_can_pop_paren(struct op_stack *stack) {
+    return stack->lhs_count != 0 &&
+        stack->lhs[stack->lhs_count - 1].op == OP_NULL;
+}
+
+bool op_stack_can_finish(struct op_stack *stack) {
+    /* the last instruction that we emit can use any target variable we like */
+    return stack->lhs_count < 2;
+}
 
 void op_stack_pop(
     struct op_stack *stack,
     struct ref *rhs,
     struct instruction *instruction
 ) {
+    assert(stack->lhs_count > 0);
     stack->lhs_count--;
 
     uxx i = stack->lhs_count;
@@ -425,52 +440,37 @@ void op_stack_pop(
     *rhs = instruction->target;
 }
 
-bool op_stack_step(
+void op_stack_push(struct op_stack *stack, struct partial_instruction *rhs) {
+    if (stack->lhs_count >= OP_STACK_CAP) {
+        error(1, 0, "too many nested expressions");
+    }
+    stack->lhs[stack->lhs_count] = *rhs;
+    stack->lhs_count += 1;
+    *rhs = (struct partial_instruction){};
+}
+
+void op_stack_finish(
     struct op_stack *stack,
+    struct ref target,
+    struct ref rhs,
     struct instruction *instruction
 ) {
-    bool empty = stack->lhs_count == 0;
-    bool rhs_noop = stack->rhs.op == OP_NULL;
-    bool lhs_noop = empty || stack->lhs[stack->lhs_count - 1].op == OP_NULL;
-    bool lhs_flush = !empty && stack->lhs[stack->lhs_count - 1].precedence
-        >= stack->rhs.precedence;
-    if (lhs_noop && rhs_noop && lhs_flush) {
-        stack->lhs_count--;
-        return false;
-    } else if (!lhs_noop && lhs_flush) {
-        /* emit an instruction and overwrite rhs->arg with the result */
-        op_stack_pop(stack, &stack->rhs.arg, instruction);
-
-        if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
-            /* finished flushing stack, use our own target */
-            static_var_count--;
-            instruction->target = stack->target;
-            stack->target = (struct ref){};
-            stack->rhs = (struct partial_instruction){};
-        }
-        return true;
-    } else if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
+    if (stack->lhs_count == 1) {
+        /* one operation remains, pop it but use our own target */
+        op_stack_pop(stack, &rhs, instruction);
+        static_var_count--;
+        instruction->target = target;
+    } else if (stack->lhs_count == 0) {
         /* no operations were added, just mov */
         instruction->opcode = OP_MOV;
-        instruction->target = stack->target;
-        instruction->arg1 = stack->rhs.arg;
+        instruction->target = target;
+        instruction->arg1 = rhs;
         instruction->arg2.mode = ARG_CONST;
         instruction->arg2.id = 0;
-        if (stack->rhs.arg.mode == ARG_VAL
-            && stack->rhs.arg.id >= stack->prev_var_count) static_var_count--;
-        stack->target.mode = 0;
-        stack->target.id = 0;
-        stack->rhs = (struct partial_instruction){};
-        return true;
+        if (rhs.mode == ARG_VAL
+            && rhs.id >= stack->prev_var_count) static_var_count--;
     } else {
-        /* stack has been flushed past desired precedence level, push */
-        if (stack->lhs_count >= OP_STACK_CAP) {
-            error(1, 0, "too many nested expressions");
-        }
-        stack->lhs[stack->lhs_count] = stack->rhs;
-        stack->lhs_count += 1;
-        stack->rhs = (struct partial_instruction){};
-        return false;
+        error(1, 0, "can't push using step anymore");
     }
 }
 
@@ -481,9 +481,6 @@ void op_stack_push_unary(
 ) {
     if (stack->lhs_count >= OP_STACK_CAP) {
         error(1, 0, "too many nested expressions");
-    }
-    if (stack->rhs.arg.mode != ARG_NULL) {
-        error(1, 0, "pushed unary operator before RHS was resolved");
     }
     uxx i = stack->lhs_count;
     stack->lhs[i].arg.mode = ARG_NULL;
@@ -507,6 +504,8 @@ void run(char *stream) {
         MODE_EXPR_FLUSH_FINAL
     } mode = MODE_INIT;
     struct op_stack op_stack;
+    struct ref target = {};
+    struct partial_instruction rhs = {};
     str varname;
     bool is_var_decl;
     bool op_stack_result;
@@ -553,17 +552,17 @@ void run(char *stream) {
                 static_vars[static_var_count].name = varname;
                 static_vars[static_var_count].val = 0;
                 static_vars[static_var_count].is_const = !is_var_decl;
-                op_stack.target.id = static_var_count;
-                op_stack.target.mode = ARG_VAL;
+                target.id = static_var_count;
+                target.mode = ARG_VAL;
                 static_var_count++;
             } else {
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
                     if (str_eq(varname, static_vars[i].name)) {
-                        op_stack.target.id = i;
-                        op_stack.target.mode = ARG_VAL;
+                        target.id = i;
+                        target.mode = ARG_VAL;
                     }
                 }
-                if (op_stack.target.mode == ARG_NULL) {
+                if (target.mode == ARG_NULL) {
                     error(1, 0, "undefined identifier '%s'", cstr(varname));
                 }
             }
@@ -572,24 +571,24 @@ void run(char *stream) {
             break;
 
         case MODE_EXPR:
-            if (op_stack.rhs.arg.mode != ARG_NULL) {
+            if (rhs.arg.mode != ARG_NULL) {
                 error(1, 0, "parse state error");
             }
             stream = read_token(stream, &token);
             switch (token.id) {
             case TOK_NUM:
-                op_stack.rhs.arg.mode = ARG_CONST;
-                op_stack.rhs.arg.id = token.val;
+                rhs.arg.mode = ARG_CONST;
+                rhs.arg.id = token.val;
                 mode = MODE_OPERATOR;
                 break;
             case TOK_IDENT:
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
                     if (str_eq(token.substr, static_vars[i].name)) {
-                        op_stack.rhs.arg.id = i;
-                        op_stack.rhs.arg.mode = ARG_VAL;
+                        rhs.arg.id = i;
+                        rhs.arg.mode = ARG_VAL;
                     }
                 }
-                if (op_stack.rhs.arg.mode == ARG_NULL) {
+                if (rhs.arg.mode == ARG_NULL) {
                     error(1, 0, "undefined identifier '%s'", cstr(token.substr));
                 }
                 varname = token.substr;
@@ -620,8 +619,8 @@ void run(char *stream) {
         case MODE_OPERATOR:
             stream = read_token(stream, &token);
             if (token.id == ')') {
-                op_stack.rhs.op = OP_NULL;
-                op_stack.rhs.precedence = PRECEDENCE_GROUPING;
+                rhs.op = OP_NULL;
+                rhs.precedence = PRECEDENCE_GROUPING;
                 mode = MODE_EXPR_FLUSH_PAREN;
             } else if (token.id == ';') {
                 mode = MODE_EXPR_FLUSH_FINAL;
@@ -631,8 +630,8 @@ void run(char *stream) {
                     if (token.id != operators[i].tok) continue;
 
                     found = true;
-                    op_stack.rhs.op = operators[i].op;
-                    op_stack.rhs.precedence = operators[i].precedence;
+                    rhs.op = operators[i].op;
+                    rhs.precedence = operators[i].precedence;
                     mode = MODE_EXPR_FLUSH_OP;
                     break;
                 }
@@ -642,21 +641,29 @@ void run(char *stream) {
             }
             break;
         case MODE_EXPR_FLUSH_OP:
-            op_stack_step(&op_stack, &instruction);
-            if (op_stack.rhs.arg.mode == ARG_NULL) {
+            if (op_stack_can_push(&op_stack, rhs.precedence)) {
+                op_stack_push(&op_stack, &rhs);
                 mode = MODE_EXPR;
+            } else {
+                op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
             break;
         case MODE_EXPR_FLUSH_PAREN:
-            op_stack_result = op_stack_step(&op_stack, &instruction);
-            if (!op_stack_result) {
+            if (op_stack_can_pop_paren(&op_stack)) {
+                op_stack.lhs_count--;
                 mode = MODE_OPERATOR;
+            } else {
+                op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
             break;
         case MODE_EXPR_FLUSH_FINAL:
-            op_stack_step(&op_stack, &instruction);
-            if (op_stack.rhs.arg.mode == ARG_NULL) {
+            if (op_stack_can_finish(&op_stack)) {
+                op_stack_finish(&op_stack, target, rhs.arg, &instruction);
+                target = (struct ref){};
+                rhs = (struct partial_instruction){};
                 mode = MODE_INIT;
+            } else {
+                op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
             break;
         default:
