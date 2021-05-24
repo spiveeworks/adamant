@@ -394,7 +394,41 @@ struct op_stack {
     struct partial_instruction rhs;
 };
 
-bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
+void op_stack_pop(
+    struct op_stack *stack,
+    struct ref *rhs,
+    struct instruction *instruction
+) {
+    stack->lhs_count--;
+
+    uxx i = stack->lhs_count;
+    instruction->opcode = stack->lhs[i].op;
+
+    if (stack->lhs[i].arg.mode == ARG_NULL) {
+        instruction->arg1 = *rhs;
+        instruction->arg2.mode = ARG_CONST;
+        instruction->arg2.id = 0;
+    } else {
+        instruction->arg1 = stack->lhs[i].arg;
+        instruction->arg2 = *rhs;
+    }
+
+    if (rhs->mode == ARG_VAL
+        && rhs->id >= stack->prev_var_count) static_var_count--;
+    if (stack->lhs[i].arg.mode == ARG_VAL
+        && stack->lhs[i].arg.id >= stack->prev_var_count) static_var_count--;
+
+    instruction->target.mode = ARG_VAL;
+    instruction->target.id = static_var_count;
+    static_var_count++;
+
+    *rhs = instruction->target;
+}
+
+bool op_stack_step(
+    struct op_stack *stack,
+    struct instruction *instruction
+) {
     bool empty = stack->lhs_count == 0;
     bool rhs_noop = stack->rhs.op == OP_NULL;
     bool lhs_noop = empty || stack->lhs[stack->lhs_count - 1].op == OP_NULL;
@@ -404,38 +438,15 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         stack->lhs_count--;
         return false;
     } else if (!lhs_noop && lhs_flush) {
-        /* TODO: track parentheses vs semicolons, make sure they match up
-           correctly */
-        stack->lhs_count--;
-
-        uxx i = stack->lhs_count;
-        instruction->opcode = stack->lhs[i].op;
-        if (stack->lhs[i].arg.mode == ARG_NULL) {
-            instruction->arg1 = stack->rhs.arg;
-            instruction->arg2.mode = ARG_CONST;
-            instruction->arg2.id = 0;
-        } else {
-            instruction->arg1 = stack->lhs[i].arg;
-            instruction->arg2 = stack->rhs.arg;
-        }
-
-        if (stack->rhs.arg.mode == ARG_VAL
-            && stack->rhs.arg.id >= stack->prev_var_count) static_var_count--;
-        if (stack->lhs[i].arg.mode == ARG_VAL
-            && stack->lhs[i].arg.id >= stack->prev_var_count) static_var_count--;
+        /* emit an instruction and overwrite rhs->arg with the result */
+        op_stack_pop(stack, &stack->rhs.arg, instruction);
 
         if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
-            /* finished flushing stack */
+            /* finished flushing stack, use our own target */
+            static_var_count--;
             instruction->target = stack->target;
             stack->target = (struct ref){};
             stack->rhs = (struct partial_instruction){};
-        } else {
-            /* output a temporary and continue */
-            instruction->target.mode = ARG_VAL;
-            instruction->target.id = static_var_count;
-            stack->rhs.arg.mode = ARG_VAL;
-            stack->rhs.arg.id = static_var_count;
-            static_var_count++;
         }
         return true;
     } else if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
