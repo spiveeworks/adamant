@@ -186,14 +186,16 @@ typedef enum {
     ARG_CONST,
 } op_mode;
 
+struct ref {
+    op_mode mode;
+    u64 id;
+};
+
 struct instruction {
     opcode opcode;
-    op_mode target_mode;
-    op_mode arg1_mode;
-    op_mode arg2_mode;
-    u64 target;
-    u64 arg1;
-    u64 arg2;
+    struct ref target;
+    struct ref arg1;
+    struct ref arg2;
 };
 
 /***************/
@@ -211,16 +213,16 @@ struct static_var{
 
 void execute_instruction(struct instruction *instruction) {
     u64 arg1 = 0;
-    switch (instruction->arg1_mode) {
+    switch (instruction->arg1.mode) {
     case ARG_VAL:
-        arg1 = static_vars[instruction->arg1].val;
+        arg1 = static_vars[instruction->arg1.id].val;
         break;
     case ARG_DEREF:
         /* direct access to the compiler's memory! */
-        arg1 = *(u64*)static_vars[instruction->arg1].val;
+        arg1 = *(u64*)static_vars[instruction->arg1.id].val;
         break;
     case ARG_CONST:
-        arg1 = instruction->arg1;
+        arg1 = instruction->arg1.id;
         break;
     case ARG_NULL:
         error(1, 0, "arg mode not set");
@@ -228,16 +230,16 @@ void execute_instruction(struct instruction *instruction) {
     }
 
     u64 arg2 = 0;
-    switch (instruction->arg2_mode) {
+    switch (instruction->arg2.mode) {
     case ARG_VAL:
-        arg2 = static_vars[instruction->arg2].val;
+        arg2 = static_vars[instruction->arg2.id].val;
         break;
     case ARG_DEREF:
         /* direct access to the compiler's memory! */
-        arg2 = *(u64*)static_vars[instruction->arg2].val;
+        arg2 = *(u64*)static_vars[instruction->arg2.id].val;
         break;
     case ARG_CONST:
-        arg2 = instruction->arg2;
+        arg2 = instruction->arg2.id;
         break;
     case ARG_NULL:
         error(1, 0, "arg mode not set");
@@ -320,12 +322,12 @@ void execute_instruction(struct instruction *instruction) {
         error(1, 0, "undefined/unimplemented opcode %d", instruction->opcode);
     }
 
-    switch (instruction->target_mode) {
+    switch (instruction->target.mode) {
     case ARG_VAL:
-        static_vars[instruction->target].val = result;
+        static_vars[instruction->target.id].val = result;
         break;
     case ARG_DEREF:
-        *(u64*)static_vars[instruction->target].val = result;
+        *(u64*)static_vars[instruction->target.id].val = result;
         break;
     case ARG_CONST:
         error(1, 0, "instruction had const target mode");
@@ -379,16 +381,14 @@ const struct {
 struct partial_instruction{
     bool is_temp;
     opcode op;
-    op_mode mode;
-    u64 arg;
+    struct ref arg;
     precedence_level precedence;
 };
 
 #define OP_STACK_CAP 16
 
 struct op_stack {
-    op_mode target_mode;
-    u64 target;
+    struct ref target;
     sxx lhs_count;
     struct partial_instruction lhs[OP_STACK_CAP];
     struct partial_instruction rhs;
@@ -410,15 +410,12 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
 
         uxx i = stack->lhs_count;
         instruction->opcode = stack->lhs[i].op;
-        if (stack->lhs[i].mode == ARG_NULL) {
-            instruction->arg1_mode = stack->rhs.mode;
+        if (stack->lhs[i].arg.mode == ARG_NULL) {
             instruction->arg1 = stack->rhs.arg;
-            instruction->arg2_mode = ARG_CONST;
-            instruction->arg2 = 0;
+            instruction->arg2.mode = ARG_CONST;
+            instruction->arg2.id = 0;
         } else {
-            instruction->arg1_mode = stack->lhs[i].mode;
             instruction->arg1 = stack->lhs[i].arg;
-            instruction->arg2_mode = stack->rhs.mode;
             instruction->arg2 = stack->rhs.arg;
         }
 
@@ -431,18 +428,16 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
 
         if (stack->lhs_count == 0 && stack->rhs.op == OP_NULL) {
             /* finished flushing stack */
-            instruction->target_mode = stack->target_mode;
             instruction->target = stack->target;
-            stack->target_mode = ARG_NULL;
-            stack->target = 0;
+            stack->target = (struct ref){};
             stack->rhs = (struct partial_instruction){};
         } else {
             /* output a temporary and continue */
-            instruction->target_mode = ARG_VAL;
-            instruction->target = static_var_count;
+            instruction->target.mode = ARG_VAL;
+            instruction->target.id = static_var_count;
             stack->rhs.is_temp = true;
-            stack->rhs.mode = ARG_VAL;
-            stack->rhs.arg = static_var_count;
+            stack->rhs.arg.mode = ARG_VAL;
+            stack->rhs.arg.id = static_var_count;
             static_var_count++;
         }
         return true;
@@ -450,14 +445,12 @@ bool op_stack_step(struct op_stack *stack, struct instruction *instruction) {
         /* no operations were added, just mov */
         instruction->opcode = OP_MOV;
         instruction->target = stack->target;
-        instruction->target_mode = stack->target_mode;
-        instruction->arg1_mode = stack->rhs.mode;
         instruction->arg1 = stack->rhs.arg;
-        instruction->arg2_mode = ARG_CONST;
-        instruction->arg2 = 0;
+        instruction->arg2.mode = ARG_CONST;
+        instruction->arg2.id = 0;
         if (stack->rhs.is_temp) static_var_count--;
-        stack->target_mode = 0;
-        stack->target = 0;
+        stack->target.mode = 0;
+        stack->target.id = 0;
         stack->rhs = (struct partial_instruction){};
         return true;
     } else {
@@ -480,13 +473,13 @@ void op_stack_push_unary(
     if (stack->lhs_count >= OP_STACK_CAP) {
         error(1, 0, "too many nested expressions");
     }
-    if (stack->rhs.mode != ARG_NULL) {
+    if (stack->rhs.arg.mode != ARG_NULL) {
         error(1, 0, "pushed unary operator before RHS was resolved");
     }
     uxx i = stack->lhs_count;
     stack->lhs[i].is_temp = false;
-    stack->lhs[i].mode = ARG_NULL;
-    stack->lhs[i].arg = 0;
+    stack->lhs[i].arg.mode = ARG_NULL;
+    stack->lhs[i].arg.id = 0;
     stack->lhs[i].op = op;
     stack->lhs[i].precedence = precedence;
     stack->lhs_count += 1;
@@ -552,17 +545,17 @@ void run(char *stream) {
                 static_vars[static_var_count].name = varname;
                 static_vars[static_var_count].val = 0;
                 static_vars[static_var_count].is_const = !is_var_decl;
-                op_stack.target = static_var_count;
-                op_stack.target_mode = ARG_VAL;
+                op_stack.target.id = static_var_count;
+                op_stack.target.mode = ARG_VAL;
                 static_var_count++;
             } else {
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
                     if (str_eq(varname, static_vars[i].name)) {
-                        op_stack.target = i;
-                        op_stack.target_mode = ARG_VAL;
+                        op_stack.target.id = i;
+                        op_stack.target.mode = ARG_VAL;
                     }
                 }
-                if (op_stack.target_mode == ARG_NULL) {
+                if (op_stack.target.mode == ARG_NULL) {
                     error(1, 0, "undefined identifier '%s'", cstr(varname));
                 }
             }
@@ -570,25 +563,25 @@ void run(char *stream) {
             break;
 
         case MODE_EXPR:
-            if (op_stack.rhs.mode != ARG_NULL) {
+            if (op_stack.rhs.arg.mode != ARG_NULL) {
                 error(1, 0, "parse state error");
             }
             stream = read_token(stream, &token);
             switch (token.id) {
             case TOK_NUM:
                 op_stack.rhs.is_temp = false;
-                op_stack.rhs.mode = ARG_CONST;
-                op_stack.rhs.arg = token.val;
+                op_stack.rhs.arg.mode = ARG_CONST;
+                op_stack.rhs.arg.id = token.val;
                 mode = MODE_OPERATOR;
                 break;
             case TOK_IDENT:
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
                     if (str_eq(token.substr, static_vars[i].name)) {
-                        op_stack.rhs.arg = i;
-                        op_stack.rhs.mode = ARG_VAL;
+                        op_stack.rhs.arg.id = i;
+                        op_stack.rhs.arg.mode = ARG_VAL;
                     }
                 }
-                if (op_stack.rhs.mode == ARG_NULL) {
+                if (op_stack.rhs.arg.mode == ARG_NULL) {
                     error(1, 0, "undefined identifier '%s'", cstr(token.substr));
                 }
                 varname = token.substr;
@@ -642,7 +635,7 @@ void run(char *stream) {
             break;
         case MODE_EXPR_FLUSH_OP:
             op_stack_step(&op_stack, &instruction);
-            if (op_stack.rhs.mode == ARG_NULL) {
+            if (op_stack.rhs.arg.mode == ARG_NULL) {
                 mode = MODE_EXPR;
             }
             break;
@@ -654,7 +647,7 @@ void run(char *stream) {
             break;
         case MODE_EXPR_FLUSH_FINAL:
             op_stack_step(&op_stack, &instruction);
-            if (op_stack.rhs.mode == ARG_NULL) {
+            if (op_stack.rhs.arg.mode == ARG_NULL) {
                 mode = MODE_INIT;
             }
             break;
