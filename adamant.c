@@ -380,9 +380,10 @@ const struct {
 };
 
 struct partial_instruction{
-    opcode op;
     struct ref arg;
+    opcode op;
     precedence_level precedence;
+    token_id close_token;
 };
 
 #define OP_STACK_CAP 16
@@ -398,7 +399,7 @@ bool op_stack_can_push(struct op_stack *stack, precedence_level precedence) {
         stack->lhs[stack->lhs_count - 1].precedence < precedence;
 }
 
-bool op_stack_can_pop_paren(struct op_stack *stack) {
+bool op_stack_can_pop_bracket(struct op_stack *stack) {
     return stack->lhs_count != 0 &&
         stack->lhs[stack->lhs_count - 1].op == OP_NULL;
 }
@@ -419,6 +420,9 @@ void op_stack_pop(
     uxx i = stack->lhs_count;
     instruction->opcode = stack->lhs[i].op;
 
+    if (stack->lhs[i].close_token != '\0') {
+        error(1, 0, "Excess open brackets\n");
+    }
     if (stack->lhs[i].arg.mode == ARG_NULL) {
         instruction->arg1 = *rhs;
         instruction->arg2.mode = ARG_CONST;
@@ -483,11 +487,41 @@ void op_stack_push_unary(
         error(1, 0, "too many nested expressions");
     }
     uxx i = stack->lhs_count;
-    stack->lhs[i].arg.mode = ARG_NULL;
-    stack->lhs[i].arg.id = 0;
+    stack->lhs[i].arg = (struct ref){};
     stack->lhs[i].op = op;
     stack->lhs[i].precedence = precedence;
+    stack->lhs[i].close_token = '\0';
     stack->lhs_count += 1;
+}
+
+void op_stack_push_bracket(
+    struct op_stack *stack,
+    token_id close_token
+) {
+    assert(close_token != '\0');
+    if (stack->lhs_count >= OP_STACK_CAP) {
+        error(1, 0, "too many nested expressions");
+    }
+    uxx i = stack->lhs_count;
+    stack->lhs[i].arg = (struct ref){};
+    stack->lhs[i].op = OP_NULL;
+    stack->lhs[i].precedence = PRECEDENCE_GROUPING;
+    stack->lhs[i].close_token = close_token;
+    stack->lhs_count += 1;
+}
+
+void op_stack_pop_bracket(
+    struct op_stack *stack,
+    token_id close_token
+) {
+    assert(close_token != '\0');
+    assert(stack->lhs_count > 0);
+    stack->lhs_count--;
+    uxx i = stack->lhs_count;
+    if (stack->lhs[i].close_token != close_token) {
+        error(1, 0, "Incorrect close bracket");
+    }
+    assert(stack->lhs[i].op == OP_NULL);
 }
 
 void run(char *stream) {
@@ -500,15 +534,15 @@ void run(char *stream) {
         MODE_EXPR,
         MODE_OPERATOR,
         MODE_EXPR_FLUSH_OP,
-        MODE_EXPR_FLUSH_PAREN,
+        MODE_EXPR_FLUSH_BRACKET,
         MODE_EXPR_FLUSH_FINAL
     } mode = MODE_INIT;
     struct op_stack op_stack;
     struct ref target = {};
     struct partial_instruction rhs = {};
     str varname;
+    token_id close_token;
     bool is_var_decl;
-    bool op_stack_result;
 
     memset(&op_stack, 0, sizeof(struct op_stack));
 
@@ -521,6 +555,7 @@ void run(char *stream) {
                 error(1, 0, "op stack was not empty at start of statement");
             }
             is_var_decl = false;
+            close_token = '\0';
             mode = MODE_STATEMENT;
             break;
         case MODE_STATEMENT:
@@ -595,7 +630,7 @@ void run(char *stream) {
                 mode = MODE_OPERATOR;
                 break;
             case '(':
-                op_stack_push_unary(&op_stack, OP_NULL, PRECEDENCE_GROUPING);
+                op_stack_push_bracket(&op_stack, ')');
                 break;
             case '!':
                 op_stack_push_unary(&op_stack, OP_LOGIC_NOT, PRECEDENCE_UNARY);
@@ -621,7 +656,8 @@ void run(char *stream) {
             if (token.id == ')') {
                 rhs.op = OP_NULL;
                 rhs.precedence = PRECEDENCE_GROUPING;
-                mode = MODE_EXPR_FLUSH_PAREN;
+                close_token = ')';
+                mode = MODE_EXPR_FLUSH_BRACKET;
             } else if (token.id == ';') {
                 mode = MODE_EXPR_FLUSH_FINAL;
             } else {
@@ -648,9 +684,12 @@ void run(char *stream) {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
             break;
-        case MODE_EXPR_FLUSH_PAREN:
-            if (op_stack_can_pop_paren(&op_stack)) {
-                op_stack.lhs_count--;
+        case MODE_EXPR_FLUSH_BRACKET:
+            if (op_stack.lhs_count == 0) {
+                error(1, 0, "Excess close brackets");
+            }
+            if (op_stack_can_pop_bracket(&op_stack)) {
+                op_stack_pop_bracket(&op_stack, close_token);
                 mode = MODE_OPERATOR;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
