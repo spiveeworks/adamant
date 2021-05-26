@@ -192,16 +192,12 @@ struct ref {
     u64 id;
 };
 
-struct instruction {
+typedef struct instruction {
     opcode opcode;
     struct ref target;
     struct ref arg1;
     struct ref arg2;
-};
-
-/***************/
-/* Interpretor */
-/***************/
+} *Instruction;
 
 #define STATIC_VAR_CAP 256
 uxx static_var_count = 0;
@@ -212,7 +208,7 @@ struct static_var{
     bool is_const;
 } static_vars[STATIC_VAR_CAP];
 
-void execute_instruction(struct instruction *instruction) {
+void execute_instruction(Instruction instruction) {
     u64 arg1 = 0;
     switch (instruction->arg1.mode) {
     case ARG_VAL:
@@ -339,6 +335,34 @@ void execute_instruction(struct instruction *instruction) {
     }
 }
 
+/*************/
+/* Functions */
+/*************/
+
+#define INSTRUCTION_CAP 0x100000
+struct instruction instructions[INSTRUCTION_CAP];
+uxx instruction_count = 0;
+
+#define FUNC_CAP 0x400
+struct func {
+    Instruction istart;
+    uxx length;
+} funcs[FUNC_CAP];
+uxx func_count = 0;
+
+void execute_function(struct func *func) {
+    Instruction iptr = func->istart;
+    Instruction end = &iptr[func->length];
+    while (iptr < end) {
+        execute_instruction(iptr);
+        iptr++;
+    }
+}
+
+/***************/
+/* Interpretor */
+/***************/
+
 typedef enum {
     PRECEDENCE_GROUPING,
     PRECEDENCE_DISJUNCTIVE,
@@ -412,7 +436,7 @@ bool op_stack_can_finish(struct op_stack *stack) {
 void op_stack_pop(
     struct op_stack *stack,
     struct ref *rhs,
-    struct instruction *instruction
+    Instruction instruction
 ) {
     assert(stack->lhs_count > 0);
     stack->lhs_count--;
@@ -457,7 +481,7 @@ void op_stack_finish(
     struct op_stack *stack,
     struct ref target,
     struct ref rhs,
-    struct instruction *instruction
+    Instruction instruction
 ) {
     if (stack->lhs_count == 1) {
         /* one operation remains, pop it but use our own target */
@@ -527,6 +551,12 @@ void op_stack_pop_bracket(
 void run(char *stream) {
     struct token token;
     struct instruction instruction;
+    struct func func;
+    uxx func_target;
+    enum {
+        MODE_INTERPRET,
+        MODE_BUILD_FUNC
+    } interpretor_state = MODE_INTERPRET;
     enum {
         MODE_INIT,
         MODE_STATEMENT,
@@ -536,7 +566,7 @@ void run(char *stream) {
         MODE_EXPR_FLUSH_OP,
         MODE_EXPR_FLUSH_BRACKET,
         MODE_EXPR_FLUSH_FINAL
-    } mode = MODE_INIT;
+    } parse_state = MODE_INIT;
     struct op_stack op_stack;
     struct ref target = {};
     struct partial_instruction rhs = {};
@@ -549,14 +579,14 @@ void run(char *stream) {
     while (true) {
         instruction.opcode = OP_NULL;
 
-        switch (mode) {
+        switch (parse_state) {
         case MODE_INIT:
             if (op_stack.lhs_count != 0) {
                 error(1, 0, "op stack was not empty at start of statement");
             }
             is_var_decl = false;
             close_token = '\0';
-            mode = MODE_STATEMENT;
+            parse_state = MODE_STATEMENT;
             break;
         case MODE_STATEMENT:
             stream = read_token(stream, &token);
@@ -565,13 +595,51 @@ void run(char *stream) {
                 return;
             case TOK_IDENT:
                 varname = token.substr;
-                mode = MODE_IDENT;
+                parse_state = MODE_IDENT;
                 break;
             case TOK_VAR:
                 if (is_var_decl) {
                     error(1, 0, "repeated \"var\" keyword");
                 }
                 is_var_decl = true;
+                break;
+            case TOK_FUNC:
+                if (interpretor_state != MODE_INTERPRET) {
+                    error(1, 0, "function definition outside of global scope");
+                }
+                stream = read_token(stream, &token);
+                if (token.id != TOK_IDENT) {
+                    error(1, 0, "expected identifier, got \"%s\"", cstr(token.substr));
+                }
+                static_vars[static_var_count].name = token.substr;
+                static_vars[static_var_count].val = -1;
+                static_vars[static_var_count].is_const = true;
+                func_target = static_var_count;
+                static_var_count++;
+                stream = read_token(stream, &token);
+                if (token.id != '(') {
+                    error(1, 0, "expected '(', got \"%s\"", cstr(token.substr));
+                }
+                stream = read_token(stream, &token);
+                if (token.id != ')') {
+                    error(1, 0, "expected ')', got \"%s\"", cstr(token.substr));
+                }
+                stream = read_token(stream, &token);
+                if (token.id != '{') {
+                    error(1, 0, "expected '{', got \"%s\"", cstr(token.substr));
+                }
+                func.istart = &instructions[instruction_count];
+                func.length = 0;
+                interpretor_state = MODE_BUILD_FUNC;
+                break;
+            case '}':
+                if (interpretor_state == MODE_INTERPRET) {
+                    error(1, 0, "expected static statement, got '}'");
+                }
+                static_vars[func_target].val = func_count;
+                funcs[func_count] = func;
+                func_count++;
+                interpretor_state = MODE_INTERPRET;
                 break;
             default:
                 error(1, 0, "currently only assignment/declaration statements are supported");
@@ -580,10 +648,45 @@ void run(char *stream) {
 
         case MODE_IDENT:
             stream = read_token(stream, &token);
+            if (token.id == '(') {
+                if (interpretor_state != MODE_INTERPRET) {
+                    error_at_line(1, 0, __FILE__, __LINE__,
+                        "function calls inside functions not yet implemented");
+                }
+                stream = read_token(stream, &token);
+                if (token.id != ')') {
+                    error(1, 0, "expected ')', got \"%s\"", cstr(token.substr));
+                }
+                stream = read_token(stream, &token);
+                if (token.id != ';') {
+                    error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
+                }
+                sxx var_id = -1;
+                for (sxx i = static_var_count - 1; i >= 0; i--) {
+                    if (str_eq(varname, static_vars[i].name)) {
+                        var_id = i;
+                        break;
+                    }
+                }
+                if (var_id == -1) {
+                    error(1, 0, "unknown function name %s", cstr(varname));
+                }
+                sxx func_id = static_vars[var_id].val;
+                if (func_id < 0 || func_id >= func_count) {
+                    error(1, 0, "%s is not a valid function pointer", cstr(varname));
+                }
+                execute_function(&funcs[func_id]);
+                parse_state = MODE_INIT;
+                break;
+            }
             if (token.id != TOK_DEFINE && token.id != '=') {
                 error(1, 0, "expected '=' or ':=', got \"%s\"", cstr(token.substr));
             }
             if (token.id == TOK_DEFINE || is_var_decl) {
+                if (interpretor_state == MODE_BUILD_FUNC) {
+                    error_at_line(1, 0, __FILE__, __LINE__,
+                        "locally scoped variables not yet implemented");
+                }
                 static_vars[static_var_count].name = varname;
                 static_vars[static_var_count].val = 0;
                 static_vars[static_var_count].is_const = !is_var_decl;
@@ -602,7 +705,7 @@ void run(char *stream) {
                 }
             }
             op_stack.prev_var_count = static_var_count;
-            mode = MODE_EXPR;
+            parse_state = MODE_EXPR;
             break;
 
         case MODE_EXPR:
@@ -614,7 +717,7 @@ void run(char *stream) {
             case TOK_NUM:
                 rhs.arg.mode = ARG_CONST;
                 rhs.arg.id = token.val;
-                mode = MODE_OPERATOR;
+                parse_state = MODE_OPERATOR;
                 break;
             case TOK_IDENT:
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
@@ -627,7 +730,7 @@ void run(char *stream) {
                     error(1, 0, "undefined identifier '%s'", cstr(token.substr));
                 }
                 varname = token.substr;
-                mode = MODE_OPERATOR;
+                parse_state = MODE_OPERATOR;
                 break;
             case '(':
                 op_stack_push_bracket(&op_stack, ')');
@@ -657,9 +760,9 @@ void run(char *stream) {
                 rhs.op = OP_NULL;
                 rhs.precedence = PRECEDENCE_GROUPING;
                 close_token = ')';
-                mode = MODE_EXPR_FLUSH_BRACKET;
+                parse_state = MODE_EXPR_FLUSH_BRACKET;
             } else if (token.id == ';') {
-                mode = MODE_EXPR_FLUSH_FINAL;
+                parse_state = MODE_EXPR_FLUSH_FINAL;
             } else {
                 bool found = false;
                 for (uxx i = 0; i < OPERATOR_COUNT; i++) {
@@ -668,7 +771,7 @@ void run(char *stream) {
                     found = true;
                     rhs.op = operators[i].op;
                     rhs.precedence = operators[i].precedence;
-                    mode = MODE_EXPR_FLUSH_OP;
+                    parse_state = MODE_EXPR_FLUSH_OP;
                     break;
                 }
                 if (!found) {
@@ -679,7 +782,7 @@ void run(char *stream) {
         case MODE_EXPR_FLUSH_OP:
             if (op_stack_can_push(&op_stack, rhs.precedence)) {
                 op_stack_push(&op_stack, &rhs);
-                mode = MODE_EXPR;
+                parse_state = MODE_EXPR;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
@@ -690,7 +793,7 @@ void run(char *stream) {
             }
             if (op_stack_can_pop_bracket(&op_stack)) {
                 op_stack_pop_bracket(&op_stack, close_token);
-                mode = MODE_OPERATOR;
+                parse_state = MODE_OPERATOR;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
@@ -700,7 +803,7 @@ void run(char *stream) {
                 op_stack_finish(&op_stack, target, rhs.arg, &instruction);
                 target = (struct ref){};
                 rhs = (struct partial_instruction){};
-                mode = MODE_INIT;
+                parse_state = MODE_INIT;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
@@ -710,7 +813,19 @@ void run(char *stream) {
             break;
         }
 
-        if (instruction.opcode != OP_NULL) execute_instruction(&instruction);
+        if (instruction.opcode == OP_NULL) continue;
+
+        switch(interpretor_state) {
+        case MODE_INTERPRET:
+            execute_instruction(&instruction);
+            break;
+        case MODE_BUILD_FUNC:
+            func.istart[func.length++] = instruction;
+            instruction_count++;
+            break;
+        default:
+            error(1, 0, "interpretor state corrupted");
+        }
     }
 }
 

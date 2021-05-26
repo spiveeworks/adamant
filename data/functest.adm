@@ -1,0 +1,13 @@
+var x := 0;
+var y := 0;
+
+func incrementx() {
+    x = x + 1;
+}
+func incrementy() {
+    y = y + 1;
+}
+
+incrementx();
+incrementy();
+incrementx();
