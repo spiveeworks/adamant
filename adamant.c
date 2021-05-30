@@ -182,6 +182,8 @@ typedef enum {
 
 typedef enum {
     ARG_NULL,
+    ARG_STATIC_VAL,
+    ARG_STATIC_DEREF,
     ARG_VAL,
     ARG_DEREF,
     ARG_CONST,
@@ -211,35 +213,47 @@ struct static_var{
 void execute_instruction(Instruction instruction) {
     u64 arg1 = 0;
     switch (instruction->arg1.mode) {
-    case ARG_VAL:
+    case ARG_NULL:
+        error(1, 0, "arg mode not set");
+        break;
+    case ARG_STATIC_VAL:
         arg1 = static_vars[instruction->arg1.id].val;
         break;
-    case ARG_DEREF:
+    case ARG_STATIC_DEREF:
         /* direct access to the compiler's memory! */
         arg1 = *(u64*)static_vars[instruction->arg1.id].val;
         break;
+    case ARG_VAL:
+        arg1 = static_vars[static_var_count + instruction->arg1.id].val;
+        break;
+    case ARG_DEREF:
+        arg1 = *(u64*)static_vars[static_var_count + instruction->arg1.id].val;
+        break;
     case ARG_CONST:
         arg1 = instruction->arg1.id;
-        break;
-    case ARG_NULL:
-        error(1, 0, "arg mode not set");
         break;
     }
 
     u64 arg2 = 0;
     switch (instruction->arg2.mode) {
-    case ARG_VAL:
+    case ARG_NULL:
+        error(1, 0, "arg mode not set");
+        break;
+    case ARG_STATIC_VAL:
         arg2 = static_vars[instruction->arg2.id].val;
         break;
-    case ARG_DEREF:
+    case ARG_STATIC_DEREF:
         /* direct access to the compiler's memory! */
         arg2 = *(u64*)static_vars[instruction->arg2.id].val;
         break;
+    case ARG_VAL:
+        arg2 = static_vars[static_var_count + instruction->arg2.id].val;
+        break;
+    case ARG_DEREF:
+        arg2 = *(u64*)static_vars[static_var_count + instruction->arg2.id].val;
+        break;
     case ARG_CONST:
         arg2 = instruction->arg2.id;
-        break;
-    case ARG_NULL:
-        error(1, 0, "arg mode not set");
         break;
     }
 
@@ -320,17 +334,23 @@ void execute_instruction(Instruction instruction) {
     }
 
     switch (instruction->target.mode) {
-    case ARG_VAL:
+    case ARG_NULL:
+        error(1, 0, "arg mode not set");
+        break;
+    case ARG_STATIC_VAL:
         static_vars[instruction->target.id].val = result;
         break;
-    case ARG_DEREF:
+    case ARG_STATIC_DEREF:
         *(u64*)static_vars[instruction->target.id].val = result;
+        break;
+    case ARG_VAL:
+        static_vars[static_var_count + instruction->target.id].val = result;
+        break;
+    case ARG_DEREF:
+        *(u64*)static_vars[static_var_count + instruction->target.id].val = result;
         break;
     case ARG_CONST:
         error(1, 0, "instruction had const target mode");
-        break;
-    case ARG_NULL:
-        error(1, 0, "arg mode not set");
         break;
     }
 }
@@ -413,7 +433,7 @@ struct partial_instruction{
 #define OP_STACK_CAP 16
 
 struct op_stack {
-    uxx prev_var_count;
+    uxx temp_var_count;
     sxx lhs_count;
     struct partial_instruction lhs[OP_STACK_CAP];
 };
@@ -456,14 +476,12 @@ void op_stack_pop(
         instruction->arg2 = *rhs;
     }
 
-    if (rhs->mode == ARG_VAL
-        && rhs->id >= stack->prev_var_count) static_var_count--;
-    if (stack->lhs[i].arg.mode == ARG_VAL
-        && stack->lhs[i].arg.id >= stack->prev_var_count) static_var_count--;
+    if (rhs->mode == ARG_VAL) stack->temp_var_count--;
+    if (stack->lhs[i].arg.mode == ARG_VAL) stack->temp_var_count--;
 
     instruction->target.mode = ARG_VAL;
-    instruction->target.id = static_var_count;
-    static_var_count++;
+    instruction->target.id = stack->temp_var_count;
+    stack->temp_var_count++;
 
     *rhs = instruction->target;
 }
@@ -486,7 +504,7 @@ void op_stack_finish(
     if (stack->lhs_count == 1) {
         /* one operation remains, pop it but use our own target */
         op_stack_pop(stack, &rhs, instruction);
-        static_var_count--;
+        stack->temp_var_count--;
         instruction->target = target;
     } else if (stack->lhs_count == 0) {
         /* no operations were added, just mov */
@@ -495,8 +513,7 @@ void op_stack_finish(
         instruction->arg1 = rhs;
         instruction->arg2.mode = ARG_CONST;
         instruction->arg2.id = 0;
-        if (rhs.mode == ARG_VAL
-            && rhs.id >= stack->prev_var_count) static_var_count--;
+        if (rhs.mode == ARG_VAL) stack->temp_var_count--;
     } else {
         error(1, 0, "can't push using step anymore");
     }
@@ -567,23 +584,20 @@ void run(char *stream) {
         MODE_EXPR_FLUSH_BRACKET,
         MODE_EXPR_FLUSH_FINAL
     } parse_state = MODE_INIT;
-    struct op_stack op_stack;
+    struct op_stack op_stack = {};
     struct ref target = {};
     struct partial_instruction rhs = {};
     str varname;
     token_id close_token;
     bool is_var_decl;
 
-    memset(&op_stack, 0, sizeof(struct op_stack));
-
     while (true) {
         instruction.opcode = OP_NULL;
 
         switch (parse_state) {
         case MODE_INIT:
-            if (op_stack.lhs_count != 0) {
-                error(1, 0, "op stack was not empty at start of statement");
-            }
+            assert(op_stack.lhs_count == 0);
+            assert(op_stack.temp_var_count == 0);
             is_var_decl = false;
             close_token = '\0';
             parse_state = MODE_STATEMENT;
@@ -691,20 +705,19 @@ void run(char *stream) {
                 static_vars[static_var_count].val = 0;
                 static_vars[static_var_count].is_const = !is_var_decl;
                 target.id = static_var_count;
-                target.mode = ARG_VAL;
+                target.mode = ARG_STATIC_VAL;
                 static_var_count++;
             } else {
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
                     if (str_eq(varname, static_vars[i].name)) {
                         target.id = i;
-                        target.mode = ARG_VAL;
+                        target.mode = ARG_STATIC_VAL;
                     }
                 }
                 if (target.mode == ARG_NULL) {
                     error(1, 0, "undefined identifier '%s'", cstr(varname));
                 }
             }
-            op_stack.prev_var_count = static_var_count;
             parse_state = MODE_EXPR;
             break;
 
@@ -723,7 +736,7 @@ void run(char *stream) {
                 for (sxx i = static_var_count - 1; i >= 0; i--) {
                     if (str_eq(token.substr, static_vars[i].name)) {
                         rhs.arg.id = i;
-                        rhs.arg.mode = ARG_VAL;
+                        rhs.arg.mode = ARG_STATIC_VAL;
                     }
                 }
                 if (rhs.arg.mode == ARG_NULL) {
