@@ -7,7 +7,13 @@ func incrementx() {
 func incrementy() {
     y = y + 1;
 }
+func swapxy() {
+    temp := x;
+    x = y;
+    y = temp;
+}
 
 incrementx();
 incrementy();
 incrementx();
+swapxy();

@@ -182,8 +182,8 @@ typedef enum {
 
 typedef enum {
     ARG_NULL,
-    ARG_STATIC_VAL,
-    ARG_STATIC_DEREF,
+    ARG_GLOBAL_VAL,
+    ARG_GLOBAL_DEREF,
     ARG_VAL,
     ARG_DEREF,
     ARG_CONST,
@@ -202,7 +202,8 @@ typedef struct instruction {
 } *Instruction;
 
 #define STATIC_VAR_CAP 256
-uxx static_var_count = 0;
+uxx global_var_count = 0;
+uxx local_var_count = 0;
 
 struct static_var{
     str name;
@@ -216,18 +217,18 @@ void execute_instruction(Instruction instruction) {
     case ARG_NULL:
         error(1, 0, "arg mode not set");
         break;
-    case ARG_STATIC_VAL:
+    case ARG_GLOBAL_VAL:
         arg1 = static_vars[instruction->arg1.id].val;
         break;
-    case ARG_STATIC_DEREF:
+    case ARG_GLOBAL_DEREF:
         /* direct access to the compiler's memory! */
         arg1 = *(u64*)static_vars[instruction->arg1.id].val;
         break;
     case ARG_VAL:
-        arg1 = static_vars[static_var_count + instruction->arg1.id].val;
+        arg1 = static_vars[global_var_count + instruction->arg1.id].val;
         break;
     case ARG_DEREF:
-        arg1 = *(u64*)static_vars[static_var_count + instruction->arg1.id].val;
+        arg1 = *(u64*)static_vars[global_var_count + instruction->arg1.id].val;
         break;
     case ARG_CONST:
         arg1 = instruction->arg1.id;
@@ -239,18 +240,18 @@ void execute_instruction(Instruction instruction) {
     case ARG_NULL:
         error(1, 0, "arg mode not set");
         break;
-    case ARG_STATIC_VAL:
+    case ARG_GLOBAL_VAL:
         arg2 = static_vars[instruction->arg2.id].val;
         break;
-    case ARG_STATIC_DEREF:
+    case ARG_GLOBAL_DEREF:
         /* direct access to the compiler's memory! */
         arg2 = *(u64*)static_vars[instruction->arg2.id].val;
         break;
     case ARG_VAL:
-        arg2 = static_vars[static_var_count + instruction->arg2.id].val;
+        arg2 = static_vars[global_var_count + instruction->arg2.id].val;
         break;
     case ARG_DEREF:
-        arg2 = *(u64*)static_vars[static_var_count + instruction->arg2.id].val;
+        arg2 = *(u64*)static_vars[global_var_count + instruction->arg2.id].val;
         break;
     case ARG_CONST:
         arg2 = instruction->arg2.id;
@@ -337,21 +338,40 @@ void execute_instruction(Instruction instruction) {
     case ARG_NULL:
         error(1, 0, "arg mode not set");
         break;
-    case ARG_STATIC_VAL:
+    case ARG_GLOBAL_VAL:
         static_vars[instruction->target.id].val = result;
         break;
-    case ARG_STATIC_DEREF:
+    case ARG_GLOBAL_DEREF:
         *(u64*)static_vars[instruction->target.id].val = result;
         break;
     case ARG_VAL:
-        static_vars[static_var_count + instruction->target.id].val = result;
+        static_vars[global_var_count + instruction->target.id].val = result;
         break;
     case ARG_DEREF:
-        *(u64*)static_vars[static_var_count + instruction->target.id].val = result;
+        *(u64*)static_vars[global_var_count + instruction->target.id].val = result;
         break;
     case ARG_CONST:
         error(1, 0, "instruction had const target mode");
         break;
+    }
+}
+
+sxx lookup_ident(str varname) {
+    for (sxx i = global_var_count + local_var_count - 1; i >= 0; i--) {
+        if (str_eq(varname, static_vars[i].name)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void set_ref(sxx id, struct ref *out) {
+    if (id < global_var_count) {
+        out->mode = ARG_GLOBAL_VAL;
+        out->id = id;
+    } else {
+        out->mode = ARG_VAL;
+        out->id = id - global_var_count;
     }
 }
 
@@ -476,11 +496,15 @@ void op_stack_pop(
         instruction->arg2 = *rhs;
     }
 
-    if (rhs->mode == ARG_VAL) stack->temp_var_count--;
-    if (stack->lhs[i].arg.mode == ARG_VAL) stack->temp_var_count--;
+    if (rhs->mode == ARG_VAL && rhs->id >= local_var_count) {
+        stack->temp_var_count--;
+    }
+    if (stack->lhs[i].arg.mode == ARG_VAL && stack->lhs[i].arg.id >= local_var_count) {
+        stack->temp_var_count--;
+    }
 
     instruction->target.mode = ARG_VAL;
-    instruction->target.id = stack->temp_var_count;
+    instruction->target.id = local_var_count + stack->temp_var_count;
     stack->temp_var_count++;
 
     *rhs = instruction->target;
@@ -513,7 +537,9 @@ void op_stack_finish(
         instruction->arg1 = rhs;
         instruction->arg2.mode = ARG_CONST;
         instruction->arg2.id = 0;
-        if (rhs.mode == ARG_VAL) stack->temp_var_count--;
+        if (rhs.mode == ARG_VAL && rhs.id >= local_var_count) {
+            stack->temp_var_count--;
+        }
     } else {
         error(1, 0, "can't push using step anymore");
     }
@@ -606,6 +632,9 @@ void run(char *stream) {
             stream = read_token(stream, &token);
             switch (token.id) {
             case '\0':
+                if (interpretor_state == MODE_BUILD_FUNC) {
+                    error(1, 0, "Got to end of file before end of function definition");
+                }
                 return;
             case TOK_IDENT:
                 varname = token.substr;
@@ -625,11 +654,11 @@ void run(char *stream) {
                 if (token.id != TOK_IDENT) {
                     error(1, 0, "expected identifier, got \"%s\"", cstr(token.substr));
                 }
-                static_vars[static_var_count].name = token.substr;
-                static_vars[static_var_count].val = -1;
-                static_vars[static_var_count].is_const = true;
-                func_target = static_var_count;
-                static_var_count++;
+                static_vars[global_var_count].name = token.substr;
+                static_vars[global_var_count].val = -1;
+                static_vars[global_var_count].is_const = true;
+                func_target = global_var_count;
+                global_var_count++;
                 stream = read_token(stream, &token);
                 if (token.id != '(') {
                     error(1, 0, "expected '(', got \"%s\"", cstr(token.substr));
@@ -653,6 +682,7 @@ void run(char *stream) {
                 static_vars[func_target].val = func_count;
                 funcs[func_count] = func;
                 func_count++;
+                local_var_count = 0;
                 interpretor_state = MODE_INTERPRET;
                 break;
             default:
@@ -675,13 +705,7 @@ void run(char *stream) {
                 if (token.id != ';') {
                     error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
                 }
-                sxx var_id = -1;
-                for (sxx i = static_var_count - 1; i >= 0; i--) {
-                    if (str_eq(varname, static_vars[i].name)) {
-                        var_id = i;
-                        break;
-                    }
-                }
+                sxx var_id = lookup_ident(varname);
                 if (var_id == -1) {
                     error(1, 0, "unknown function name %s", cstr(varname));
                 }
@@ -697,26 +721,27 @@ void run(char *stream) {
                 error(1, 0, "expected '=' or ':=', got \"%s\"", cstr(token.substr));
             }
             if (token.id == TOK_DEFINE || is_var_decl) {
+                uxx id;
                 if (interpretor_state == MODE_BUILD_FUNC) {
-                    error_at_line(1, 0, __FILE__, __LINE__,
-                        "locally scoped variables not yet implemented");
+                    id = global_var_count + local_var_count;
+                    target.id = local_var_count;
+                    target.mode = ARG_VAL;
+                    local_var_count++;
+                } else {
+                    id = global_var_count;
+                    target.id = global_var_count;
+                    target.mode = ARG_GLOBAL_VAL;
+                    global_var_count++;
                 }
-                static_vars[static_var_count].name = varname;
-                static_vars[static_var_count].val = 0;
-                static_vars[static_var_count].is_const = !is_var_decl;
-                target.id = static_var_count;
-                target.mode = ARG_STATIC_VAL;
-                static_var_count++;
+                static_vars[id].name = varname;
+                static_vars[id].val = 0;
+                static_vars[id].is_const = !is_var_decl;
             } else {
-                for (sxx i = static_var_count - 1; i >= 0; i--) {
-                    if (str_eq(varname, static_vars[i].name)) {
-                        target.id = i;
-                        target.mode = ARG_STATIC_VAL;
-                    }
-                }
-                if (target.mode == ARG_NULL) {
+                sxx id = lookup_ident(varname);
+                if (id == -1) {
                     error(1, 0, "undefined identifier '%s'", cstr(varname));
                 }
+                set_ref(id, &target);
             }
             parse_state = MODE_EXPR;
             break;
@@ -732,19 +757,16 @@ void run(char *stream) {
                 rhs.arg.id = token.val;
                 parse_state = MODE_OPERATOR;
                 break;
-            case TOK_IDENT:
-                for (sxx i = static_var_count - 1; i >= 0; i--) {
-                    if (str_eq(token.substr, static_vars[i].name)) {
-                        rhs.arg.id = i;
-                        rhs.arg.mode = ARG_STATIC_VAL;
-                    }
-                }
-                if (rhs.arg.mode == ARG_NULL) {
+            case TOK_IDENT: {
+                sxx id = lookup_ident(token.substr);
+                if (id == -1) {
                     error(1, 0, "undefined identifier '%s'", cstr(token.substr));
                 }
+                set_ref(id, &rhs.arg);
                 varname = token.substr;
                 parse_state = MODE_OPERATOR;
                 break;
+            }
             case '(':
                 op_stack_push_bracket(&op_stack, ')');
                 break;
@@ -890,7 +912,7 @@ int main(int argc, char **argv) {
 
     run(input.data);
 
-    for (uxx i = 0; i < static_var_count; i++) {
+    for (uxx i = 0; i < global_var_count; i++) {
         str varname = static_vars[i].name;
         char *cstr = strndup(varname.data, varname.size);
         char *assign = static_vars[i].is_const ? ":=" : "=";
