@@ -1,0 +1,13 @@
+var x = 0;
+
+func callee() {
+    y := 0;
+}
+
+func caller() {
+    z := 1;
+    callee();
+    x = z;
+}
+
+caller();

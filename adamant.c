@@ -167,7 +167,8 @@ typedef enum {
     OP_LOGIC_NOT,
     OP_NOT,
     OP_NEG,
-    OP_MEMBER
+    OP_MEMBER,
+    OP_FUNC
 } opcode;
 
 typedef enum {
@@ -177,6 +178,7 @@ typedef enum {
     ARG_VAL,
     ARG_DEREF,
     ARG_CONST,
+    ARG_STACK_OFFSET
 } op_mode;
 
 struct ref {
@@ -201,52 +203,31 @@ struct static_var{
     bool is_const;
 } static_vars[STATIC_VAR_CAP];
 
-void execute_instruction(Instruction instruction) {
-    u64 arg1 = 0;
-    switch (instruction->arg1.mode) {
+u64 read_ref(struct ref ref) {
+    switch (ref.mode) {
     case ARG_NULL:
         error(1, 0, "arg mode not set");
-        break;
+        return -1;
     case ARG_GLOBAL_VAL:
-        arg1 = static_vars[instruction->arg1.id].val;
-        break;
+        return static_vars[ref.id].val;
     case ARG_GLOBAL_DEREF:
         /* direct access to the compiler's memory! */
-        arg1 = *(u64*)static_vars[instruction->arg1.id].val;
-        break;
+        return *(u64*)static_vars[ref.id].val;
     case ARG_VAL:
-        arg1 = static_vars[global_var_count + instruction->arg1.id].val;
-        break;
+        return static_vars[global_var_count + ref.id].val;
     case ARG_DEREF:
-        arg1 = *(u64*)static_vars[global_var_count + instruction->arg1.id].val;
-        break;
+        return *(u64*)static_vars[global_var_count + ref.id].val;
     case ARG_CONST:
-        arg1 = instruction->arg1.id;
-        break;
+        return ref.id;
+    case ARG_STACK_OFFSET:
+        error(1, 0, "tried to read stack offset as arithmetic value");
+        return -1;
     }
+}
 
-    u64 arg2 = 0;
-    switch (instruction->arg2.mode) {
-    case ARG_NULL:
-        error(1, 0, "arg mode not set");
-        break;
-    case ARG_GLOBAL_VAL:
-        arg2 = static_vars[instruction->arg2.id].val;
-        break;
-    case ARG_GLOBAL_DEREF:
-        /* direct access to the compiler's memory! */
-        arg2 = *(u64*)static_vars[instruction->arg2.id].val;
-        break;
-    case ARG_VAL:
-        arg2 = static_vars[global_var_count + instruction->arg2.id].val;
-        break;
-    case ARG_DEREF:
-        arg2 = *(u64*)static_vars[global_var_count + instruction->arg2.id].val;
-        break;
-    case ARG_CONST:
-        arg2 = instruction->arg2.id;
-        break;
-    }
+void execute_instruction(Instruction instruction) {
+    u64 arg1 = read_ref(instruction->arg1);
+    u64 arg2 = read_ref(instruction->arg2);
 
     u64 result = 0;
     switch (instruction->opcode) {
@@ -320,6 +301,8 @@ void execute_instruction(Instruction instruction) {
         break;
     case OP_MEMBER:
         error(1, 0, "member operator not yet implemented");
+    case OP_FUNC:
+        error(1, 0, "function call invoked as arithmetic");
     default:
         error(1, 0, "undefined/unimplemented opcode %d", instruction->opcode);
     }
@@ -343,6 +326,8 @@ void execute_instruction(Instruction instruction) {
     case ARG_CONST:
         error(1, 0, "instruction had const target mode");
         break;
+    case ARG_STACK_OFFSET:
+        error(1, 0, "instruction had stack offset as target");
     }
 }
 
@@ -380,13 +365,28 @@ struct func {
 } funcs[FUNC_CAP];
 uxx func_count = 0;
 
-void execute_function(struct func *func) {
+void execute_function(struct func *func, s64 offset) {
+    global_var_count += offset;
+
     Instruction iptr = func->istart;
     Instruction end = &iptr[func->length];
     while (iptr < end) {
-        execute_instruction(iptr);
+        if (iptr->opcode == OP_FUNC) {
+            sxx func_id = read_ref(iptr->arg1);
+            if (func_id < 0 || func_id >= func_count) {
+                error(1, 0, "%ld is not a valid function pointer", func_id);
+            }
+            if (iptr->arg2.mode != ARG_STACK_OFFSET) {
+                error(1, 0, "got function call without stack offset");
+            }
+            execute_function(&funcs[func_id], iptr->arg2.id);
+        } else {
+            execute_instruction(iptr);
+        }
         iptr++;
     }
+
+    global_var_count -= offset;
 }
 
 /***************/
@@ -683,10 +683,6 @@ void run(char *stream) {
         case MODE_IDENT:
             stream = read_token(stream, &token);
             if (token.id == '(') {
-                if (interpretor_state != MODE_INTERPRET) {
-                    error_at_line(1, 0, __FILE__, __LINE__,
-                        "function calls inside functions not yet implemented");
-                }
                 stream = read_token(stream, &token);
                 if (token.id != ')') {
                     error(1, 0, "expected ')', got \"%s\"", cstr(token.substr));
@@ -699,11 +695,10 @@ void run(char *stream) {
                 if (var_id == -1) {
                     error(1, 0, "unknown function name %s", cstr(varname));
                 }
-                sxx func_id = static_vars[var_id].val;
-                if (func_id < 0 || func_id >= func_count) {
-                    error(1, 0, "%s is not a valid function pointer", cstr(varname));
-                }
-                execute_function(&funcs[func_id]);
+                instruction.opcode = OP_FUNC;
+                set_ref(var_id, &instruction.arg1);
+                instruction.arg2.mode = ARG_STACK_OFFSET;
+                instruction.arg2.id = global_var_count + local_var_count;
                 parse_state = MODE_INIT;
                 break;
             }
@@ -842,7 +837,18 @@ void run(char *stream) {
 
         switch(interpretor_state) {
         case MODE_INTERPRET:
-            execute_instruction(&instruction);
+            if (instruction.opcode == OP_FUNC) {
+                sxx func_id = read_ref(instruction.arg1);
+                if (func_id < 0 || func_id >= func_count) {
+                    error(1, 0, "%s is not a valid function pointer", cstr(varname));
+                }
+                if (instruction.arg2.mode != ARG_STACK_OFFSET) {
+                    error(1, 0, "got function call without stack offset");
+                }
+                execute_function(&funcs[func_id], instruction.arg2.id);
+            } else {
+                execute_instruction(&instruction);
+            }
             break;
         case MODE_BUILD_FUNC:
             func.istart[func.length++] = instruction;

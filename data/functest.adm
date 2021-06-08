@@ -15,5 +15,15 @@ func swapxy() {
 
 incrementx();
 incrementy();
-incrementx();
-swapxy();
+
+var z := incrementx;
+
+func callz() {
+    z();
+}
+
+callz();
+
+z = swapxy;
+
+callz();
