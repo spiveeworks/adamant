@@ -145,6 +145,7 @@ char *read_token(char *stream, Token token) {
 
 typedef enum {
     OP_NULL,
+    /* arithmetic instructions */
     OP_MOV,
     OP_LOGIC_OR,
     OP_LOGIC_AND,
@@ -168,7 +169,10 @@ typedef enum {
     OP_NOT,
     OP_NEG,
     OP_MEMBER,
-    OP_FUNC
+    /* for interpretor use */
+    OP_FUNC,
+    /* for parser use */
+    OP_DEREF
 } opcode;
 
 typedef enum {
@@ -303,6 +307,8 @@ void execute_instruction(Instruction instruction) {
         error(1, 0, "member operator not yet implemented");
     case OP_FUNC:
         error(1, 0, "function call invoked as arithmetic");
+    case OP_DEREF:
+        error(1, 0, "deref operator invoked as arithmetic");
     default:
         error(1, 0, "undefined/unimplemented opcode %d", instruction->opcode);
     }
@@ -460,7 +466,8 @@ bool op_stack_can_pop_bracket(struct op_stack *stack) {
 
 bool op_stack_can_finish(struct op_stack *stack) {
     /* the last instruction that we emit can use any target variable we like */
-    return stack->lhs_count < 2;
+    return stack->lhs_count == 0 ||
+        (stack->lhs_count == 1 && stack->lhs[0].op != OP_DEREF);
 }
 
 void op_stack_pop(
@@ -477,7 +484,25 @@ void op_stack_pop(
     if (stack->lhs[i].close_token != '\0') {
         error(1, 0, "Excess open brackets\n");
     }
-    if (stack->lhs[i].arg.mode == ARG_NULL) {
+
+    if (stack->lhs[i].op == OP_DEREF) {
+        if (rhs->mode == ARG_VAL) {
+            rhs->mode = ARG_DEREF;
+            instruction->opcode = OP_NULL;
+            return;
+        } /* else */
+        if (rhs->mode == ARG_GLOBAL_VAL) {
+            rhs->mode = ARG_GLOBAL_DEREF;
+            instruction->opcode = OP_NULL;
+            return;
+        } /* else */
+        instruction->opcode = OP_MOV;
+        instruction->arg1 = *rhs;
+        instruction->arg2.mode = ARG_CONST;
+        instruction->arg2.id = 0;
+        /* keep op on the stack, to try again next time */
+        stack->lhs_count++;
+    } else if (stack->lhs[i].arg.mode == ARG_NULL) {
         instruction->arg1 = *rhs;
         instruction->arg2.mode = ARG_CONST;
         instruction->arg2.id = 0;
@@ -486,10 +511,14 @@ void op_stack_pop(
         instruction->arg2 = *rhs;
     }
 
-    if (rhs->mode == ARG_VAL && rhs->id >= local_var_count) {
+    if ((rhs->mode == ARG_VAL || rhs->mode == ARG_DEREF)
+        && rhs->id >= local_var_count)
+    {
         stack->temp_var_count--;
     }
-    if (stack->lhs[i].arg.mode == ARG_VAL && stack->lhs[i].arg.id >= local_var_count) {
+    if ((stack->lhs[i].arg.mode == ARG_VAL || rhs->mode == ARG_DEREF)
+        && stack->lhs[i].arg.id >= local_var_count)
+    {
         stack->temp_var_count--;
     }
 
@@ -760,13 +789,18 @@ void run(char *stream) {
                 break;
             case '-':
                 /* TODO check and forbid strange expressions like x * -y */
+                /* TODO make this lower precedence than multiplication */
                 op_stack_push_unary(&op_stack, OP_NEG, PRECEDENCE_UNARY);
                 break;
             case '~':
+                /* TODO make this lower precedence than bitwise and */
                 op_stack_push_unary(&op_stack, OP_NOT, PRECEDENCE_UNARY);
                 break;
             case '+':
                 /* this no-op is nice for emphasising sign conventions */
+                break;
+            case '*':
+                op_stack_push_unary(&op_stack, OP_DEREF, PRECEDENCE_UNARY);
                 break;
             default:
                 error(1, 0, "expected expression, got \"%s\"", cstr(token.substr));
