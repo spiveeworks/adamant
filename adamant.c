@@ -43,6 +43,7 @@ typedef enum {
     TOK_LSHIFT,
     TOK_RSHIFT,
     TOK_VAR,
+    TOK_LOCAL,
     TOK_FUNC
 } token_id;
 
@@ -62,12 +63,13 @@ const struct compound_operators {
     {TOK_RSHIFT, ">>"}
 };
 
-#define KEYWORD_COUNT 2
+#define KEYWORD_COUNT 3
 const struct keywords {
     token_id id;
     char *word;
 } keywords[KEYWORD_COUNT] = {
     {TOK_VAR, "var"},
+    {TOK_LOCAL, "local"},
     {TOK_FUNC, "func"}
 };
 
@@ -201,13 +203,34 @@ typedef struct instruction {
 uxx global_var_count = 0;
 uxx local_var_count = 0;
 
+typedef enum {
+    DECL_VAL,
+    DECL_VAR,
+    DECL_LOCAL
+} decl_type;
+
 struct static_var{
     str name;
     s64 val;
-    bool is_const;
+    decl_type decl_type;
 } static_vars[STATIC_VAR_CAP];
 
+#define MEM_STACK_CAP 256
+u64 mem_stack[MEM_STACK_CAP];
+uxx mem_stack_count = 0;
+u64 * const MEM_START = mem_stack;
+u64 * const MEM_END = mem_stack + MEM_STACK_CAP;
+
+u64 *lookup(u64 addr) {
+    u64 *ptr = (u64*)addr;
+    if (ptr < MEM_START || ptr + 1 >= MEM_END) {
+        error(1, 0, "Attempted to dereference %p, outside of allowed memory", ptr);
+    }
+    return ptr;
+}
+
 u64 read_ref(struct ref ref) {
+    u64 *loc;
     switch (ref.mode) {
     case ARG_NULL:
         error(1, 0, "arg mode not set");
@@ -215,12 +238,11 @@ u64 read_ref(struct ref ref) {
     case ARG_GLOBAL_VAL:
         return static_vars[ref.id].val;
     case ARG_GLOBAL_DEREF:
-        /* direct access to the compiler's memory! */
-        return *(u64*)static_vars[ref.id].val;
+        return *lookup(static_vars[ref.id].val);
     case ARG_VAL:
         return static_vars[global_var_count + ref.id].val;
     case ARG_DEREF:
-        return *(u64*)static_vars[global_var_count + ref.id].val;
+        return *lookup(static_vars[global_var_count + ref.id].val);
     case ARG_CONST:
         return ref.id;
     case ARG_STACK_OFFSET:
@@ -321,13 +343,15 @@ void execute_instruction(Instruction instruction) {
         static_vars[instruction->target.id].val = result;
         break;
     case ARG_GLOBAL_DEREF:
-        *(u64*)static_vars[instruction->target.id].val = result;
+        *lookup(static_vars[instruction->target.id].val)
+                = result;
         break;
     case ARG_VAL:
         static_vars[global_var_count + instruction->target.id].val = result;
         break;
     case ARG_DEREF:
-        *(u64*)static_vars[global_var_count + instruction->target.id].val = result;
+        *lookup(static_vars[global_var_count + instruction->target.id].val)
+            = result;
         break;
     case ARG_CONST:
         error(1, 0, "instruction had const target mode");
@@ -634,7 +658,8 @@ void run(char *stream) {
     struct partial_instruction rhs = {};
     str varname;
     token_id close_token;
-    bool is_var_decl;
+    /* not to be confused with C++ decltype */
+    decl_type decl_type;
 
     while (true) {
         instruction.opcode = OP_NULL;
@@ -643,7 +668,7 @@ void run(char *stream) {
         case MODE_INIT:
             assert(op_stack.lhs_count == 0);
             assert(op_stack.temp_var_count == 0);
-            is_var_decl = false;
+            decl_type = DECL_VAL;
             close_token = '\0';
             parse_state = MODE_STATEMENT;
             break;
@@ -660,10 +685,19 @@ void run(char *stream) {
                 parse_state = MODE_IDENT;
                 break;
             case TOK_VAR:
-                if (is_var_decl) {
-                    error(1, 0, "repeated \"var\" keyword");
+                if (decl_type != DECL_VAL) {
+                    error(1, 0, "multiple declaration keywords in a row");
                 }
-                is_var_decl = true;
+                decl_type = DECL_VAR;
+                break;
+            case TOK_LOCAL:
+                if (decl_type != DECL_VAL) {
+                    error(1, 0, "multiple declaration keywords in a row");
+                }
+                decl_type = DECL_LOCAL;
+                if (interpretor_state != MODE_INTERPRET) {
+                    error_at_line(1, 0, __FILE__, __LINE__, "local variables in function definitions (ironically) not yet implemented");
+                }
                 break;
             case TOK_FUNC:
                 if (interpretor_state != MODE_INTERPRET) {
@@ -675,7 +709,7 @@ void run(char *stream) {
                 }
                 static_vars[global_var_count].name = token.substr;
                 static_vars[global_var_count].val = -1;
-                static_vars[global_var_count].is_const = true;
+                static_vars[global_var_count].decl_type = DECL_VAL;
                 func_target = global_var_count;
                 global_var_count++;
                 stream = read_token(stream, &token);
@@ -734,28 +768,38 @@ void run(char *stream) {
             if (token.id != TOK_DEFINE && token.id != '=') {
                 error(1, 0, "expected '=' or ':=', got \"%s\"", cstr(token.substr));
             }
-            if (token.id == TOK_DEFINE || is_var_decl) {
-                uxx id;
-                if (interpretor_state == MODE_BUILD_FUNC) {
-                    id = global_var_count + local_var_count;
-                    target.id = local_var_count;
-                    target.mode = ARG_VAL;
-                    local_var_count++;
-                } else {
-                    id = global_var_count;
-                    target.id = global_var_count;
-                    target.mode = ARG_GLOBAL_VAL;
-                    global_var_count++;
-                }
-                static_vars[id].name = varname;
-                static_vars[id].val = 0;
-                static_vars[id].is_const = !is_var_decl;
-            } else {
+            if (token.id == '=' && decl_type == DECL_VAL) {
                 sxx id = lookup_ident(varname);
                 if (id == -1) {
                     error(1, 0, "undefined identifier '%s'", cstr(varname));
                 }
+                if (static_vars[id].decl_type != DECL_VAR) {
+                    error(1, 0, "tried to write to constant '%s'", cstr(varname));
+                }
                 set_ref(id, &target);
+            } else {
+                uxx id;
+                bool deref_target = decl_type == DECL_LOCAL;
+                if (interpretor_state == MODE_BUILD_FUNC) {
+                    id = global_var_count + local_var_count;
+                    target.id = local_var_count;
+                    target.mode = deref_target ? ARG_DEREF : ARG_VAL;
+                    local_var_count++;
+                } else {
+                    id = global_var_count;
+                    target.id = global_var_count;
+                    /* global scope, not to be confused with global lifetime */
+                    target.mode = deref_target ? ARG_GLOBAL_DEREF : ARG_GLOBAL_VAL;
+                    global_var_count++;
+                }
+                static_vars[id].name = varname;
+                if (decl_type == DECL_LOCAL) {
+                    static_vars[id].val = (u64)(&mem_stack[mem_stack_count]);
+                    mem_stack_count++;
+                } else {
+                    static_vars[id].val = 0;
+                }
+                static_vars[id].decl_type = decl_type;
             }
             parse_state = MODE_EXPR;
             break;
@@ -945,7 +989,16 @@ int main(int argc, char **argv) {
     for (uxx i = 0; i < global_var_count; i++) {
         str varname = static_vars[i].name;
         char *cstr = strndup(varname.data, varname.size);
-        char *assign = static_vars[i].is_const ? ":=" : "=";
-        printf("%s %s %ld\n", cstr, assign, static_vars[i].val);
+        switch(static_vars[i].decl_type) {
+        case DECL_VAL:
+            printf("%s := %ld\n", cstr, static_vars[i].val);
+            break;
+        case DECL_VAR:
+            printf("var %s = %ld\n", cstr, static_vars[i].val);
+            break;
+        case DECL_LOCAL:
+            printf("local %s = %ld\n", cstr, *lookup(static_vars[i].val));
+            break;
+        }
     }
 }

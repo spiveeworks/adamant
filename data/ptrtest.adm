@@ -1,2 +1,5 @@
 
-x := *0;
+local x = 5;
+ptrx := x;
+valx := *x;
+
