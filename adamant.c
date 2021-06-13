@@ -206,7 +206,8 @@ uxx local_var_count = 0;
 typedef enum {
     DECL_VAL,
     DECL_VAR,
-    DECL_LOCAL
+    DECL_LOCAL,
+    DECL_WRITE
 } decl_type;
 
 struct static_var{
@@ -376,6 +377,16 @@ void set_ref(sxx id, struct ref *out) {
         out->id = id;
     } else {
         out->mode = ARG_VAL;
+        out->id = id - global_var_count;
+    }
+}
+
+void set_ref_write(sxx id, struct ref *out) {
+    if (id < global_var_count) {
+        out->mode = ARG_GLOBAL_DEREF;
+        out->id = id;
+    } else {
+        out->mode = ARG_DEREF;
         out->id = id - global_var_count;
     }
 }
@@ -699,6 +710,13 @@ void run(char *stream) {
                     error_at_line(1, 0, __FILE__, __LINE__, "local variables in function definitions (ironically) not yet implemented");
                 }
                 break;
+            case '*':
+                if (decl_type != DECL_VAL) {
+                    error(1, 0, "expected identifier, got '*'");
+                }
+                /* FIXME `*var x = 0;` etc. will give weird error messages */
+                decl_type = DECL_WRITE;
+                break;
             case TOK_FUNC:
                 if (interpretor_state != MODE_INTERPRET) {
                     error(1, 0, "function definition outside of global scope");
@@ -746,6 +764,9 @@ void run(char *stream) {
         case MODE_IDENT:
             stream = read_token(stream, &token);
             if (token.id == '(') {
+                if (decl_type != DECL_VAL) {
+                    error(1, 0, "expected '=' or ':=', got '('");
+                }
                 stream = read_token(stream, &token);
                 if (token.id != ')') {
                     error(1, 0, "expected ')', got \"%s\"", cstr(token.substr));
@@ -777,6 +798,18 @@ void run(char *stream) {
                     error(1, 0, "tried to write to constant '%s'", cstr(varname));
                 }
                 set_ref(id, &target);
+            } else if (decl_type == DECL_WRITE) {
+                if (token.id != '=') {
+                    error(1, 0, "cannot write to pointer using ':=', use '=' instead.");
+                }
+                sxx id = lookup_ident(varname);
+                if (id == -1) {
+                    error(1, 0, "undefined identifier '%s'", cstr(varname));
+                }
+                if (static_vars[id].decl_type == DECL_VAR) {
+                    error(1, 0, "writing to variable pointers is not yet implemented, save the variable to a constant first.");
+                }
+                set_ref_write(id, &target);
             } else {
                 uxx id;
                 bool deref_target = decl_type == DECL_LOCAL;

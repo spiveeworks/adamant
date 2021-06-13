@@ -1,5 +1,9 @@
 
 local x = 5;
 ptrx := x;
-valx := *x;
+val1 := *x;
+*ptrx = 7;
+val2 := *x;
+*x = 10;
+val3 := *x;
 
