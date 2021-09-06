@@ -46,7 +46,8 @@ typedef enum {
     TOK_RSHIFT,
     TOK_VAR,
     TOK_LOCAL,
-    TOK_FUNC
+    TOK_FUNC,
+    TOK_PROC
 } token_id;
 
 #define COMPOUND_OPERATOR_COUNT 9
@@ -65,14 +66,15 @@ const struct compound_operators {
     {TOK_RSHIFT, ">>"}
 };
 
-#define KEYWORD_COUNT 3
+#define KEYWORD_COUNT 4
 const struct keywords {
     token_id id;
     char *word;
 } keywords[KEYWORD_COUNT] = {
     {TOK_VAR, "var"},
     {TOK_LOCAL, "local"},
-    {TOK_FUNC, "func"}
+    {TOK_FUNC, "func"},
+    {TOK_PROC, "proc"}
 };
 
 #define IS_LOWER(c) ('a' <= (c) && (c) <= 'z')
@@ -401,10 +403,17 @@ void set_ref_write(sxx id, struct ref *out) {
 struct instruction instructions[INSTRUCTION_CAP];
 uxx instruction_count = 0;
 
+enum func_modifier {
+    FUNC_DYNAMIC,
+    FUNC_PROC
+    /* , FUNC_STATIC, FUNC_CODEGEN */
+};
+
 #define FUNC_CAP 0x400
 struct func {
     Instruction istart;
     uxx length;
+    enum func_modifier mod;
 } funcs[FUNC_CAP];
 uxx func_count = 0;
 
@@ -503,6 +512,33 @@ FILE* start_elf(char *path) {
     elf_text_size = TEXT_BINARY_SIZE;
 
     return out;
+}
+
+void compile_proc(struct func *proc, bool is_entry_point) {
+    Instruction istart = proc->istart;
+    u64 icount = proc->length;
+    for (u64 i = 0; i < icount; i++) {
+        struct instruction instr = istart[i];
+        switch (instr.opcode) {
+        default:
+            error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
+        }
+    }
+}
+
+void compile(void) {
+    int entry_point = 0;
+    str entrypoint_name = {4, "main"};
+    for (u64 i = 0; i < global_var_count; i++) {
+        if (str_eq(static_vars[i].name, entrypoint_name)) {
+            entry_point = i;
+        }
+    }
+    for (u64 i = 0; i < func_count; i++) {
+        if (funcs[i].mod == FUNC_PROC) {
+            compile_proc(&funcs[i], i == entry_point);
+        }
+    }
 }
 
 #define SECTION_NAMES_BINARY_SIZE 32
@@ -858,9 +894,11 @@ void run(char *stream) {
                 decl_type = DECL_WRITE;
                 break;
             case TOK_FUNC:
+            case TOK_PROC:
                 if (interpretor_state != MODE_INTERPRET) {
                     error(1, 0, "function definition outside of global scope");
                 }
+                bool is_proc = token.id == TOK_PROC;
                 stream = read_token(stream, &token);
                 if (token.id != TOK_IDENT) {
                     error(1, 0, "expected identifier, got \"%s\"", cstr(token.substr));
@@ -884,6 +922,8 @@ void run(char *stream) {
                 }
                 func.istart = &instructions[instruction_count];
                 func.length = 0;
+                if (is_proc) func.mod = FUNC_PROC;
+                else func.mod = FUNC_DYNAMIC;
                 interpretor_state = MODE_BUILD_FUNC;
                 break;
             case '}':
@@ -1150,13 +1190,13 @@ int main(int argc, char **argv) {
 
     input = read_file(argv[1]);
 
-    if (argc > 2) {
-        output = start_elf(argv[2]);
-    }
-
     run(input.data);
 
-    if (output) end_elf(output);
+    if (argc > 2) {
+        output = start_elf(argv[2]);
+        compile();
+        end_elf(output);
+    }
 
     for (uxx i = 0; i < global_var_count; i++) {
         str varname = static_vars[i].name;
