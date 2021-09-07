@@ -175,6 +175,7 @@ typedef enum {
     OP_NOT,
     OP_NEG,
     OP_MEMBER,
+    OP_EXIT,
     /* for interpretor use */
     OP_FUNC,
     /* for parser use */
@@ -414,6 +415,8 @@ struct func {
     Instruction istart;
     uxx length;
     enum func_modifier mod;
+    /* this is for type checking, not for execution */
+    uxx num_params;
 } funcs[FUNC_CAP];
 uxx func_count = 0;
 
@@ -838,6 +841,7 @@ void run(char *stream) {
         MODE_OPERATOR,
         MODE_EXPR_FLUSH_OP,
         MODE_EXPR_FLUSH_BRACKET,
+        MODE_EXPR_FLUSH_FUNC,
         MODE_EXPR_FLUSH_FINAL
     } parse_state = MODE_INIT;
     struct op_stack op_stack = {};
@@ -845,6 +849,10 @@ void run(char *stream) {
     struct partial_instruction rhs = {};
     str varname;
     token_id close_token;
+    bool is_func_statement = false;
+    sxx func_statement_var_id = -1;
+    /* at some point this will need to be on the parse stack */
+    uxx multivalue_count = 0;
     /* not to be confused with C++ decltype */
     decl_type decl_type;
 
@@ -912,9 +920,22 @@ void run(char *stream) {
                 if (token.id != '(') {
                     error(1, 0, "expected '(', got \"%s\"", cstr(token.substr));
                 }
-                stream = read_token(stream, &token);
-                if (token.id != ')') {
-                    error(1, 0, "expected ')', got \"%s\"", cstr(token.substr));
+                func.num_params = 0;
+                while (true) {
+                    stream = read_token(stream, &token);
+                    if (token.id == ')') break;
+                    if (token.id != TOK_IDENT) {
+                        error(1, 0, "expected identifier, or ')', got \"%s\"", cstr(token.substr));
+                    }
+                    func.num_params += 1;
+                    uxx id = global_var_count + local_var_count;
+                    static_vars[id].name = token.substr;
+                    local_var_count++;
+                    stream = read_token(stream, &token);
+                    if (token.id == ')') break;
+                    if (token.id != ',') {
+                        error(1, 0, "expected ',', or ')', got \"%s\"", cstr(token.substr));
+                    }
                 }
                 stream = read_token(stream, &token);
                 if (token.id != '{') {
@@ -947,23 +968,14 @@ void run(char *stream) {
                 if (decl_type != DECL_VAL) {
                     error(1, 0, "expected '=' or ':=', got '('");
                 }
-                stream = read_token(stream, &token);
-                if (token.id != ')') {
-                    error(1, 0, "expected ')', got \"%s\"", cstr(token.substr));
-                }
-                stream = read_token(stream, &token);
-                if (token.id != ';') {
-                    error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
-                }
                 sxx var_id = lookup_ident(varname);
                 if (var_id == -1) {
                     error(1, 0, "unknown function name %s", cstr(varname));
                 }
-                instruction.opcode = OP_FUNC;
-                set_ref(var_id, &instruction.arg1);
-                instruction.arg2.mode = ARG_STACK_OFFSET;
-                instruction.arg2.id = global_var_count + local_var_count;
-                parse_state = MODE_INIT;
+                func_statement_var_id = var_id;
+                multivalue_count = 0;
+                is_func_statement = true;
+                parse_state = MODE_EXPR;
                 break;
             }
             if (token.id != TOK_DEFINE && token.id != '=') {
@@ -1022,6 +1034,13 @@ void run(char *stream) {
                 error(1, 0, "parse state error");
             }
             stream = read_token(stream, &token);
+            if (is_func_statement && token.id == ')') {
+                parse_state = MODE_EXPR_FLUSH_FUNC;
+                break;
+            }
+            if (is_func_statement) {
+                error(1, 0, "arguments in function calls not yet implemented");
+            }
             switch (token.id) {
             case TOK_NUM:
                 rhs.arg.mode = ARG_CONST;
@@ -1108,6 +1127,23 @@ void run(char *stream) {
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
+            break;
+        case MODE_EXPR_FLUSH_FUNC:
+            stream = read_token(stream, &token);
+            if (token.id != ';') {
+                error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
+            }
+            /* TODO: type check that the number of arguments is correct.
+               Requires function pointer types if we want non-constant
+               function application */
+            instruction.opcode = OP_FUNC;
+            set_ref(func_statement_var_id, &instruction.arg1);
+            instruction.arg2.mode = ARG_STACK_OFFSET;
+            instruction.arg2.id = global_var_count + local_var_count;
+            parse_state = MODE_INIT;
+            is_func_statement = false;
+            func_statement_var_id = -1;
+            multivalue_count = 0;
             break;
         case MODE_EXPR_FLUSH_FINAL:
             if (op_stack_can_finish(&op_stack)) {
