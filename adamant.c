@@ -841,7 +841,6 @@ void run(char *stream) {
         MODE_OPERATOR,
         MODE_EXPR_FLUSH_OP,
         MODE_EXPR_FLUSH_BRACKET,
-        MODE_EXPR_FLUSH_FUNC,
         MODE_EXPR_FLUSH_FINAL
     } parse_state = MODE_INIT;
     struct op_stack op_stack = {};
@@ -852,7 +851,6 @@ void run(char *stream) {
     bool is_func_statement = false;
     sxx func_statement_var_id = -1;
     /* at some point this will need to be on the parse stack */
-    uxx multivalue_count = 0;
     /* not to be confused with C++ decltype */
     decl_type decl_type;
 
@@ -973,7 +971,6 @@ void run(char *stream) {
                     error(1, 0, "unknown function name %s", cstr(varname));
                 }
                 func_statement_var_id = var_id;
-                multivalue_count = 0;
                 is_func_statement = true;
                 parse_state = MODE_EXPR;
                 break;
@@ -1020,6 +1017,7 @@ void run(char *stream) {
                 static_vars[id].name = varname;
                 if (decl_type == DECL_LOCAL) {
                     static_vars[id].val = (u64)(&mem_stack[mem_stack_count]);
+                    /* FIXME what happens when we have locals inside a func? */
                     mem_stack_count++;
                 } else {
                     static_vars[id].val = 0;
@@ -1034,12 +1032,11 @@ void run(char *stream) {
                 error(1, 0, "parse state error");
             }
             stream = read_token(stream, &token);
-            if (is_func_statement && token.id == ')') {
-                parse_state = MODE_EXPR_FLUSH_FUNC;
+            if (is_func_statement && token.id == ')'
+                && op_stack.lhs_count == 0)
+            {
+                parse_state = MODE_EXPR_FLUSH_BRACKET;
                 break;
-            }
-            if (is_func_statement) {
-                error(1, 0, "arguments in function calls not yet implemented");
             }
             switch (token.id) {
             case TOK_NUM:
@@ -1119,33 +1116,49 @@ void run(char *stream) {
             break;
         case MODE_EXPR_FLUSH_BRACKET:
             if (op_stack.lhs_count == 0) {
-                error(1, 0, "Excess close brackets");
-            }
-            if (op_stack_can_pop_bracket(&op_stack)) {
+                if (!is_func_statement) {
+                    error(1, 0, "Excess close brackets");
+                }
+                if (rhs.arg.mode != ARG_VAL || rhs.arg.id < local_var_count) {
+                    instruction.opcode = OP_MOV;
+                    instruction.arg1 = rhs.arg;
+                    instruction.arg2.mode = ARG_CONST;
+                    instruction.arg2.id = 0;
+                    struct ref target;
+                    target.mode = ARG_VAL;
+                    target.id = local_var_count + op_stack.temp_var_count;
+                    instruction.target = target;
+                    rhs.arg = target;
+                    op_stack.temp_var_count++;
+                    break;
+                }
+                stream = read_token(stream, &token);
+                if (token.id != ';') {
+                    error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
+                }
+                rhs = (struct partial_instruction){};
+                /* TODO: type check that the number of arguments is correct.
+                   Requires function pointer types if we want non-constant
+                   function application */
+                instruction.opcode = OP_FUNC;
+                set_ref(func_statement_var_id, &instruction.arg1);
+                instruction.arg2.mode = ARG_STACK_OFFSET;
+                instruction.arg2.id = local_var_count;
+                parse_state = MODE_INIT;
+                is_func_statement = false;
+                func_statement_var_id = -1;
+                op_stack.temp_var_count = 0;
+            } else if (op_stack_can_pop_bracket(&op_stack)) {
                 op_stack_pop_bracket(&op_stack, close_token);
                 parse_state = MODE_OPERATOR;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             }
             break;
-        case MODE_EXPR_FLUSH_FUNC:
-            stream = read_token(stream, &token);
-            if (token.id != ';') {
-                error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
-            }
-            /* TODO: type check that the number of arguments is correct.
-               Requires function pointer types if we want non-constant
-               function application */
-            instruction.opcode = OP_FUNC;
-            set_ref(func_statement_var_id, &instruction.arg1);
-            instruction.arg2.mode = ARG_STACK_OFFSET;
-            instruction.arg2.id = global_var_count + local_var_count;
-            parse_state = MODE_INIT;
-            is_func_statement = false;
-            func_statement_var_id = -1;
-            multivalue_count = 0;
-            break;
         case MODE_EXPR_FLUSH_FINAL:
+            if (is_func_statement) {
+                error(1, 0, "unclosed parenthesis in function application");
+            }
             if (op_stack_can_finish(&op_stack)) {
                 op_stack_finish(&op_stack, target, rhs.arg, &instruction);
                 target = (struct ref){};
