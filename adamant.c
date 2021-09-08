@@ -678,6 +678,11 @@ bool op_stack_can_pop_bracket(struct op_stack *stack) {
         stack->lhs[stack->lhs_count - 1].op == OP_NULL;
 }
 
+bool op_stack_must_copy(struct op_stack *stack, struct ref rhs) {
+    return stack->lhs_count == 0 &&
+        (rhs.mode != ARG_VAL || rhs.id < local_var_count);
+}
+
 bool op_stack_can_finish(struct op_stack *stack) {
     /* the last instruction that we emit can use any target variable we like */
     return stack->lhs_count == 0 ||
@@ -824,6 +829,23 @@ void op_stack_pop_bracket(
     assert(stack->lhs[i].op == OP_NULL);
 }
 
+void op_stack_copy(
+    struct op_stack *stack,
+    struct ref *rhs,
+    Instruction instruction
+) {
+    instruction->opcode = OP_MOV;
+    instruction->arg1 = *rhs;
+    instruction->arg2.mode = ARG_CONST;
+    instruction->arg2.id = 0;
+    struct ref target;
+    target.mode = ARG_VAL;
+    target.id = local_var_count + stack->temp_var_count;
+    instruction->target = target;
+    *rhs = target;
+    stack->temp_var_count++;
+}
+
 void run(char *stream) {
     struct token token;
     struct instruction instruction;
@@ -841,6 +863,7 @@ void run(char *stream) {
         MODE_OPERATOR,
         MODE_EXPR_FLUSH_OP,
         MODE_EXPR_FLUSH_BRACKET,
+        MODE_EXPR_FLUSH_COMMA,
         MODE_EXPR_FLUSH_FINAL
     } parse_state = MODE_INIT;
     struct op_stack op_stack = {};
@@ -1088,6 +1111,8 @@ void run(char *stream) {
                 rhs.precedence = PRECEDENCE_GROUPING;
                 close_token = ')';
                 parse_state = MODE_EXPR_FLUSH_BRACKET;
+            } else if (token.id == ',' && is_func_statement) {
+                parse_state = MODE_EXPR_FLUSH_COMMA;
             } else if (token.id == ';') {
                 parse_state = MODE_EXPR_FLUSH_FINAL;
             } else {
@@ -1115,23 +1140,13 @@ void run(char *stream) {
             }
             break;
         case MODE_EXPR_FLUSH_BRACKET:
-            if (op_stack.lhs_count == 0) {
-                if (!is_func_statement) {
-                    error(1, 0, "Excess close brackets");
-                }
-                if (rhs.arg.mode != ARG_VAL || rhs.arg.id < local_var_count) {
-                    instruction.opcode = OP_MOV;
-                    instruction.arg1 = rhs.arg;
-                    instruction.arg2.mode = ARG_CONST;
-                    instruction.arg2.id = 0;
-                    struct ref target;
-                    target.mode = ARG_VAL;
-                    target.id = local_var_count + op_stack.temp_var_count;
-                    instruction.target = target;
-                    rhs.arg = target;
-                    op_stack.temp_var_count++;
-                    break;
-                }
+            if (op_stack.lhs_count == 0 && !is_func_statement) {
+                error(1, 0, "Excess close brackets");
+            }
+
+            if (op_stack_must_copy(&op_stack, rhs.arg)) {
+                op_stack_copy(&op_stack, &rhs.arg, &instruction);
+            } else if (op_stack.lhs_count == 0) {
                 stream = read_token(stream, &token);
                 if (token.id != ';') {
                     error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
@@ -1153,6 +1168,16 @@ void run(char *stream) {
                 parse_state = MODE_OPERATOR;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
+            }
+            break;
+        case MODE_EXPR_FLUSH_COMMA:
+            if (op_stack_must_copy(&op_stack, rhs.arg)) {
+                op_stack_copy(&op_stack, &rhs.arg, &instruction);
+            } else if (op_stack.lhs_count != 0) {
+                op_stack_pop(&op_stack, &rhs.arg, &instruction);
+            } else {
+                rhs = (struct partial_instruction){};
+                parse_state = MODE_EXPR;
             }
             break;
         case MODE_EXPR_FLUSH_FINAL:

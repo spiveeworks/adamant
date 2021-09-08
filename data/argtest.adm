@@ -1,11 +1,22 @@
 
 var x = 0;
+var y = 0;
 
-func f(y) {
-    x = x + y;
+func f(a) {
+    x = x + a;
 }
 
-f(1);
+func mad(a, b) {
+    y = y + a * b;
+}
 
-f(2);
+c := 2;
+d := 3;
+
+f(c + 1);
+
+f(2 * d);
+
+mad(x, 1);
+mad(2 * c, d + 1);
 
