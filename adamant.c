@@ -182,6 +182,14 @@ typedef enum {
     OP_DEREF
 } opcode;
 
+#define INTRINSIC_COUNT 1
+const struct intrinsics {
+    opcode opcode;
+    char *word;
+} intrinsics[INTRINSIC_COUNT] = {
+    {OP_EXIT, "exit"}
+};
+
 typedef enum {
     ARG_NULL,
     ARG_GLOBAL_VAL,
@@ -258,8 +266,15 @@ u64 read_ref(struct ref ref) {
 }
 
 void execute_instruction(Instruction instruction) {
-    u64 arg1 = read_ref(instruction->arg1);
-    u64 arg2 = read_ref(instruction->arg2);
+    u64 arg1;
+    u64 arg2;
+    if (instruction->arg1.mode == ARG_STACK_OFFSET) {
+        arg1 = static_vars[global_var_count + instruction->arg1.id].val;
+        arg2 = static_vars[global_var_count + instruction->arg1.id + 1].val;
+    } else {
+        arg1 = read_ref(instruction->arg1);
+        arg2 = read_ref(instruction->arg2);
+    }
 
     u64 result = 0;
     switch (instruction->opcode) {
@@ -333,6 +348,8 @@ void execute_instruction(Instruction instruction) {
         break;
     case OP_MEMBER:
         error(1, 0, "member operator not yet implemented");
+    case OP_EXIT:
+        exit(arg1);
     case OP_FUNC:
         error(1, 0, "function call invoked as arithmetic");
     case OP_DEREF:
@@ -374,6 +391,15 @@ sxx lookup_ident(str varname) {
         }
     }
     return -1;
+}
+
+opcode lookup_intrinsic(str varname) {
+    for (sxx i = 0; i < INTRINSIC_COUNT; i++) {
+        if (strncmp(varname.data, intrinsics[i].word, varname.size) == 0) {
+            return intrinsics[i].opcode;
+        }
+    }
+    return OP_NULL;
 }
 
 void set_ref(sxx id, struct ref *out) {
@@ -517,7 +543,7 @@ FILE* start_elf(char *path) {
     return out;
 }
 
-void compile_proc(struct func *proc, bool is_entry_point) {
+void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
     Instruction istart = proc->istart;
     u64 icount = proc->length;
     for (u64 i = 0; i < icount; i++) {
@@ -529,7 +555,7 @@ void compile_proc(struct func *proc, bool is_entry_point) {
     }
 }
 
-void compile(void) {
+void compile(FILE *out) {
     int entry_point = 0;
     str entrypoint_name = {4, "main"};
     for (u64 i = 0; i < global_var_count; i++) {
@@ -539,7 +565,7 @@ void compile(void) {
     }
     for (u64 i = 0; i < func_count; i++) {
         if (funcs[i].mod == FUNC_PROC) {
-            compile_proc(&funcs[i], i == entry_point);
+            compile_proc(&funcs[i], i == entry_point, out);
         }
     }
 }
@@ -872,6 +898,7 @@ void run(char *stream) {
     str varname;
     token_id close_token;
     bool is_func_statement = false;
+    opcode func_statement_op;
     sxx func_statement_var_id = -1;
     /* at some point this will need to be on the parse stack */
     /* not to be confused with C++ decltype */
@@ -991,6 +1018,11 @@ void run(char *stream) {
                 }
                 sxx var_id = lookup_ident(varname);
                 if (var_id == -1) {
+                    func_statement_op = lookup_intrinsic(varname);
+                } else {
+                    func_statement_op = OP_FUNC;
+                }
+                if (var_id == -1 && func_statement_op == OP_NULL) {
                     error(1, 0, "unknown function name %s", cstr(varname));
                 }
                 func_statement_var_id = var_id;
@@ -1155,10 +1187,17 @@ void run(char *stream) {
                 /* TODO: type check that the number of arguments is correct.
                    Requires function pointer types if we want non-constant
                    function application */
-                instruction.opcode = OP_FUNC;
-                set_ref(func_statement_var_id, &instruction.arg1);
-                instruction.arg2.mode = ARG_STACK_OFFSET;
-                instruction.arg2.id = local_var_count;
+                if (func_statement_op == OP_FUNC) {
+                    set_ref(func_statement_var_id, &instruction.arg1);
+                    instruction.arg2.mode = ARG_STACK_OFFSET;
+                    instruction.arg2.id = local_var_count;
+                } else {
+                    instruction.arg1.mode = ARG_STACK_OFFSET;
+                    instruction.arg1.id = local_var_count;
+                    instruction.arg2.mode = ARG_CONST;
+                    instruction.arg2.id = 0;
+                }
+                instruction.opcode = func_statement_op;
                 parse_state = MODE_INIT;
                 is_func_statement = false;
                 func_statement_var_id = -1;
@@ -1268,7 +1307,7 @@ int main(int argc, char **argv) {
 
     if (argc > 2) {
         output = start_elf(argv[2]);
-        compile();
+        compile(output);
         end_elf(output);
     }
 
