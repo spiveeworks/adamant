@@ -490,13 +490,6 @@ const u64 elf_e_shoff_location = 0x20;
 const u64 elf_p_filesz_location = 0x50;
 const u64 elf_p_memsz_location = 0x54;
 
-#define TEXT_BINARY_SIZE 34
-const b8 machine_code_binary[TEXT_BINARY_SIZE] = {
-    0xBB, 0x00, 0x00, 0x00, 0x00,
-    0xB8, 0x01, 0x00, 0x00, 0x00,
-    0xCD, 0x80
-};
-
 void put32(b32 x, FILE *out) {
     putc(x & 0xFF, out);
     x >>= 8;
@@ -517,7 +510,6 @@ void putbytes(const b8 *x, u64 size, FILE *out) {
     for (u64 i = 0; i < size; i++) putc(x[i], out);
 }
 
-u64 elf_size = 0;
 u64 elf_text_offset = 0;
 u64 elf_text_size = 0;
 u64 elf_data_size = 0;
@@ -531,24 +523,94 @@ FILE* start_elf(char *path) {
         error_at_line(1, 0, __FILE__, __LINE__, "Failed to change permissions for \"%s\".", path);
     }
 
-    elf_size = 0;
     putbytes(header_binary, HEADER_BINARY_SIZE, out);
-    elf_size += HEADER_BINARY_SIZE;
 
-    elf_text_offset = elf_size;
-    putbytes(machine_code_binary, TEXT_BINARY_SIZE, out);
-    elf_size += TEXT_BINARY_SIZE;
-    elf_text_size = TEXT_BINARY_SIZE;
+    elf_text_offset = ftell(out);
 
     return out;
 }
 
+struct var_state {
+    u64 offset;
+    bool reg;
+    bool initialised;
+} var_state[STATIC_VAR_CAP];
+enum reg {
+    REG_EAX,
+    REG_ECX,
+    REG_EDX,
+    REG_EBX,
+};
+struct reg_state {
+    s64 var;
+    bool initialised;
+} reg_state[4];
+struct local_state {
+    s64 var;
+} local_state[STATIC_VAR_CAP];
+
 void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
+    if (!is_entry_point) error(1, 0, "Currently the only proc must be main.");
+
+    for (sxx i = 0; i < STATIC_VAR_CAP; i++) {
+        var_state[i] = (struct var_state){};
+        local_state[i].var = -1;
+    }
+    for (sxx i = 0; i < 4; i++) {
+        reg_state[i].var = -1;
+    }
+
     Instruction istart = proc->istart;
     u64 icount = proc->length;
+
     for (u64 i = 0; i < icount; i++) {
         struct instruction instr = istart[i];
         switch (instr.opcode) {
+        case OP_MOV:
+            if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_CONST) {
+                s32 reg = -1;
+                for (u8 j = 0; j < 4; j++) {
+                    if (reg_state[j].var == -1) {
+                        reg = j;
+                        break;
+                    }
+                }
+                if (reg == -1) {
+                    error(1, 0, "all registers are full");
+                }
+                putc(0xB8 + reg, out);
+                if (instr.arg1.id > 0xFFFFFFFF) {
+                    error(1, 0, "values must be 32 bit at this time");
+                }
+                put32(instr.arg1.id, out);
+                reg_state[reg].var = instr.target.id;
+                var_state[instr.target.id].offset = reg;
+                var_state[instr.target.id].reg = true;
+                var_state[instr.target.id].initialised = true;
+            } else if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_VAL) {
+                error(1, 0, "assignment is not yet implemented");
+            } else {
+                error(1, 0, "addresses are not yet implemented");
+            }
+            break;
+        case OP_EXIT:
+            assert(instr.arg1.mode == ARG_STACK_OFFSET);
+            sxx var = instr.arg1.id;
+            if (!var_state[var].initialised) {
+                error(1, 0, "exit with uninitialised variable");
+            }
+            assert(var_state[var].reg);
+            sxx reg = var_state[var].offset;
+            /* mov ebx, var ; return code*/
+            putc(0x89, out);
+            putc(0300 | (reg << 3) | REG_EBX, out);
+            /* mov eax, 1   ; SC_EXIT*/
+            putc(0xB8, out);
+            put32(1, out);
+            /* int 0x80     ; system call*/
+            putc(0xCD, out);
+            putc(0x80, out);
+            break;
         default:
             error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
         }
@@ -577,22 +639,21 @@ const b8 section_names_binary[SECTION_NAMES_BINARY_SIZE] = {
 };
 
 void end_elf(FILE *out) {
-    u64 elf_rodata_offset = elf_size;
+    u64 elf_rodata_offset = ftell(out);
+    elf_text_size = elf_rodata_offset - elf_text_offset;
     assert(elf_data_size == 0);
     /*
     putbytes(data_binary, elf_data_size, out);
-    elf_size += elf_data_size;
     */
 
-    u64 p_filesz = elf_size;
+    u64 p_filesz = ftell(out);
 
-    u64 elf_shrtrtab_offset = elf_size;
+    u64 elf_shrtrtab_offset = ftell(out);
     putbytes(section_names_binary, SECTION_NAMES_BINARY_SIZE, out);
-    elf_size += SECTION_NAMES_BINARY_SIZE;
 
 
     /* section header table (nobody really needs this) */
-    u64 elf_sh_offset = elf_size;
+    u64 elf_sh_offset = ftell(out);
 
     for (u64 i = 0; i < 40; i++) putc(0, out); /* null table entry */
 

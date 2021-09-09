@@ -1,5 +1,5 @@
 
 proc main() {
-    exit(1);
+    exit(77);
 }
 
