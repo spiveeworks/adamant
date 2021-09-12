@@ -565,10 +565,31 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
 
     for (u64 i = 0; i < icount; i++) {
         struct instruction instr = istart[i];
-        switch (instr.opcode) {
-        case OP_MOV:
+        if (instr.opcode == OP_EXIT) {
+            assert(instr.arg1.mode == ARG_STACK_OFFSET);
+            sxx var = instr.arg1.id;
+            if (!var_state[var].initialised) {
+                error(1, 0, "exit with uninitialised variable");
+            }
+            assert(var_state[var].reg);
+            sxx reg = var_state[var].offset;
+            if (reg != REG_EBX) {
+                /* mov ebx, var ; return code*/
+                putc(0x89, out);
+                putc(0300 | (reg << 3) | REG_EBX, out);
+                printf("mov ebx, %%%lu\n", var);
+            }
+            /* mov eax, 1   ; SC_EXIT*/
+            putc(0xB8, out);
+            put32(1, out);
+            /* int 0x80     ; system call*/
+            putc(0xCD, out);
+            putc(0x80, out);
+        } else if (instr.opcode == OP_FUNC) {
+            error(1, 0, "tried to compile function application");
+        } else {
+            s32 reg = -1;
             if (instr.target.mode == ARG_VAL) {
-                s32 reg = -1;
                 for (u8 j = 0; j < 4; j++) {
                     if (reg_state[j].var == -1) {
                         reg = j;
@@ -578,6 +599,10 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                 if (reg == -1) {
                     error(1, 0, "all registers are full");
                 }
+            } else {
+                error(1, 0, "addresses are not yet implemented");
+            }
+            if (instr.opcode == OP_MOV) {
                 if (instr.arg1.mode == ARG_CONST) {
                     putc(0xB8 + reg, out);
                     if (instr.arg1.id > 0xFFFFFFFF) {
@@ -605,32 +630,8 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                 var_state[instr.target.id].reg = true;
                 var_state[instr.target.id].initialised = true;
             } else {
-                error(1, 0, "addresses are not yet implemented");
+                error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
             }
-            break;
-        case OP_EXIT:
-            assert(instr.arg1.mode == ARG_STACK_OFFSET);
-            sxx var = instr.arg1.id;
-            if (!var_state[var].initialised) {
-                error(1, 0, "exit with uninitialised variable");
-            }
-            assert(var_state[var].reg);
-            sxx reg = var_state[var].offset;
-            if (reg != REG_EBX) {
-                /* mov ebx, var ; return code*/
-                putc(0x89, out);
-                putc(0300 | (reg << 3) | REG_EBX, out);
-                printf("mov ebx, %%%lu\n", var);
-            }
-            /* mov eax, 1   ; SC_EXIT*/
-            putc(0xB8, out);
-            put32(1, out);
-            /* int 0x80     ; system call*/
-            putc(0xCD, out);
-            putc(0x80, out);
-            break;
-        default:
-            error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
         }
     }
     printf("\n");
