@@ -567,7 +567,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
         struct instruction instr = istart[i];
         switch (instr.opcode) {
         case OP_MOV:
-            if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_CONST) {
+            if (instr.target.mode == ARG_VAL) {
                 s32 reg = -1;
                 for (u8 j = 0; j < 4; j++) {
                     if (reg_state[j].var == -1) {
@@ -578,17 +578,32 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                 if (reg == -1) {
                     error(1, 0, "all registers are full");
                 }
-                putc(0xB8 + reg, out);
-                if (instr.arg1.id > 0xFFFFFFFF) {
-                    error(1, 0, "values must be 32 bit at this time");
+                if (instr.arg1.mode == ARG_CONST) {
+                    putc(0xB8 + reg, out);
+                    if (instr.arg1.id > 0xFFFFFFFF) {
+                        error(1, 0, "values must be 32 bit at this time");
+                    }
+                    put32(instr.arg1.id, out);
+                    printf("mov %%%lu, %lu\n", instr.target.id, instr.arg1.id);
+                } else if (instr.arg1.mode == ARG_VAL) {
+                    if (!var_state[instr.arg1.id].initialised) {
+                        error(1, 0, "reading from uninitialised variable %lu",
+                            instr.arg1.id);
+                    }
+                    if (!var_state[instr.arg1.id].reg) {
+                        error(1, 0, "reading from non-register value");
+                    }
+                    s32 read_reg = var_state[instr.arg1.id].offset;
+                    putc(0x89, out);
+                    putc(0300 | (read_reg << 3) | reg, out);
+                    printf("mov %%%lu, %%%lu\n", instr.target.id, instr.arg1.id);
+                } else {
+                    error(1, 0, "addresses are not yet implemented");
                 }
-                put32(instr.arg1.id, out);
                 reg_state[reg].var = instr.target.id;
                 var_state[instr.target.id].offset = reg;
                 var_state[instr.target.id].reg = true;
                 var_state[instr.target.id].initialised = true;
-            } else if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_VAL) {
-                error(1, 0, "assignment is not yet implemented");
             } else {
                 error(1, 0, "addresses are not yet implemented");
             }
@@ -601,9 +616,12 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
             }
             assert(var_state[var].reg);
             sxx reg = var_state[var].offset;
-            /* mov ebx, var ; return code*/
-            putc(0x89, out);
-            putc(0300 | (reg << 3) | REG_EBX, out);
+            if (reg != REG_EBX) {
+                /* mov ebx, var ; return code*/
+                putc(0x89, out);
+                putc(0300 | (reg << 3) | REG_EBX, out);
+                printf("mov ebx, %%%lu\n", var);
+            }
             /* mov eax, 1   ; SC_EXIT*/
             putc(0xB8, out);
             put32(1, out);
@@ -615,6 +633,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
             error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
         }
     }
+    printf("\n");
 }
 
 void compile(FILE *out) {
