@@ -1,6 +1,7 @@
 
 proc main() {
-    x := 77;
-    exit(x);
+    x := 25;
+    y := x + 50;
+    exit(x + y);
 }
 

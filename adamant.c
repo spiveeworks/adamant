@@ -602,7 +602,8 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
             } else {
                 error(1, 0, "addresses are not yet implemented");
             }
-            if (instr.opcode == OP_MOV) {
+            /* MOV first argument, possibly in preparation for binary ops */
+            {
                 if (instr.arg1.mode == ARG_CONST) {
                     putc(0xB8 + reg, out);
                     if (instr.arg1.id > 0xFFFFFFFF) {
@@ -629,7 +630,32 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                 var_state[instr.target.id].offset = reg;
                 var_state[instr.target.id].reg = true;
                 var_state[instr.target.id].initialised = true;
-            } else {
+            }
+            if (instr.opcode == OP_ADD) {
+                if (instr.arg2.mode == ARG_CONST) {
+                    putc(0x81, out);
+                    putc(0300 | reg, out);
+                    if (instr.arg2.id > 0xFFFFFFFF) {
+                        error(1, 0, "values must be 32 bit at this time");
+                    }
+                    put32(instr.arg2.id, out);
+                    printf("add %%%lu, %lu\n", instr.target.id, instr.arg2.id);
+                } else if (instr.arg2.mode == ARG_VAL) {
+                    if (!var_state[instr.arg2.id].initialised) {
+                        error(1, 0, "reading from uninitialised variable %lu",
+                            instr.arg2.id);
+                    }
+                    if (!var_state[instr.arg2.id].reg) {
+                        error(1, 0, "reading from non-register value");
+                    }
+                    s32 read_reg = var_state[instr.arg2.id].offset;
+                    putc(0x01, out);
+                    putc(0300 | (read_reg << 3) | reg, out);
+                    printf("add %%%lu, %%%lu\n", instr.target.id, instr.arg2.id);
+                } else {
+                    error(1, 0, "addresses are not yet implemented");
+                }
+            } else if (instr.opcode != OP_MOV) {
                 error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
             }
         }
