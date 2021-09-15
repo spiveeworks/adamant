@@ -1,7 +1,8 @@
 
 proc main() {
-    x := 25;
-    y := x + 50;
-    exit(x + y);
+    var x = 10;
+    x = x + 10;
+    x = x - 5;
+    exit(x ^ 7);
 }
 

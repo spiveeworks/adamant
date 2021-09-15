@@ -631,15 +631,23 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                 var_state[instr.target.id].reg = true;
                 var_state[instr.target.id].initialised = true;
             }
-            if (instr.opcode == OP_ADD) {
+            s8 simple_opcode = -1;
+            if (instr.opcode == OP_ADD) simple_opcode = 0;
+            if (instr.opcode == OP_OR) simple_opcode = 1;
+            if (instr.opcode == OP_AND) simple_opcode = 4;
+            if (instr.opcode == OP_SUB) simple_opcode = 5;
+            if (instr.opcode == OP_XOR) simple_opcode = 6;
+            char *simple_mnemonics[8] = {"add", "or", "adc", "sbb", "and",
+                "sub", "xor", "cmp"};
+            if (simple_opcode != -1) {
                 if (instr.arg2.mode == ARG_CONST) {
                     putc(0x81, out);
-                    putc(0300 | reg, out);
+                    putc(0300 | (simple_opcode << 3) | reg, out);
                     if (instr.arg2.id > 0xFFFFFFFF) {
                         error(1, 0, "values must be 32 bit at this time");
                     }
                     put32(instr.arg2.id, out);
-                    printf("add %%%lu, %lu\n", instr.target.id, instr.arg2.id);
+                    printf("%s %%%lu, %lu\n", simple_mnemonics[simple_opcode], instr.target.id, instr.arg2.id);
                 } else if (instr.arg2.mode == ARG_VAL) {
                     if (!var_state[instr.arg2.id].initialised) {
                         error(1, 0, "reading from uninitialised variable %lu",
@@ -649,12 +657,13 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                         error(1, 0, "reading from non-register value");
                     }
                     s32 read_reg = var_state[instr.arg2.id].offset;
-                    putc(0x01, out);
+                    putc(0001 | (simple_opcode << 3), out);
                     putc(0300 | (read_reg << 3) | reg, out);
-                    printf("add %%%lu, %%%lu\n", instr.target.id, instr.arg2.id);
+                    printf("%s %%%lu, %%%lu\n", simple_mnemonics[simple_opcode], instr.target.id, instr.arg2.id);
                 } else {
                     error(1, 0, "addresses are not yet implemented");
                 }
+            } else if (instr.opcode == OP_SUB) {
             } else if (instr.opcode != OP_MOV) {
                 error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
             }
