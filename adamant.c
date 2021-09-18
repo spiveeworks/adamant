@@ -589,7 +589,18 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
             error(1, 0, "tried to compile function application");
         } else {
             s32 reg = -1;
-            if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_VAL && instr.target.id == instr.arg1.id) {
+            if ((instr.target.mode == ARG_VAL && instr.arg2.mode == ARG_VAL
+                    && instr.target.id == instr.arg2.id)
+                || (instr.arg1.mode == ARG_CONST
+                    && instr.arg2.mode != ARG_CONST))
+            {
+                struct ref swp = instr.arg1;
+                instr.arg1 = instr.arg2;
+                instr.arg2 = swp;
+            }
+            if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_VAL
+                && instr.target.id == instr.arg1.id)
+            {
                 if (!var_state[instr.arg1.id].initialised) {
                     error(1, 0, "reading from uninitialised variable %lu",
                         instr.arg1.id);
@@ -598,6 +609,12 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                     error(1, 0, "reading from non-register value");
                 }
                 reg = var_state[instr.arg1.id].offset;
+            } else if (instr.target.mode == ARG_VAL
+                && var_state[instr.target.id].reg)
+            {
+                /* eventually there will be lots of ways for registers to
+                   unbind, but this will do for now. */
+                reg = var_state[instr.target.id].offset;
             } else if (instr.target.mode == ARG_VAL) {
                 for (u8 j = 0; j < 4; j++) {
                     if (reg_state[j].var == -1) {
