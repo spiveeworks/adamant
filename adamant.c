@@ -535,12 +535,16 @@ struct var_state {
     bool reg;
     bool initialised;
 } var_state[STATIC_VAR_CAP];
+
 enum reg {
     REG_EAX,
     REG_ECX,
     REG_EDX,
     REG_EBX,
 };
+
+char *reg_mnemonics_32[8] = {"eax", "ecx", "edx", "ebx"};
+
 struct reg_state {
     s64 var;
     bool initialised;
@@ -548,6 +552,92 @@ struct reg_state {
 struct local_state {
     s64 var;
 } local_state[STATIC_VAR_CAP];
+
+u8 get_reg(u64 var) {
+    if (!var_state[var].initialised) {
+        error(1, 0, "reading from uninitialised variable %lu", var);
+    }
+    if (!var_state[var].reg) {
+        error(1, 0, "reading from non-register value");
+    }
+    return var_state[var].offset;
+}
+
+void relocate_var(u8 r1, sxx v2, FILE *out) {
+    u8 r2 = get_reg(v2);
+    if (reg_state[r1].initialised) {
+        sxx v1 = reg_state[r1].var;
+        if (r1 == r2) return;
+        putc(0x87, out);
+        putc(0300 | (r2 << 3) | r1, out);
+        printf("xchg %s, %s\n", reg_mnemonics_32[r1], reg_mnemonics_32[r2]);
+
+        reg_state[r2].var = v1;
+        var_state[v1].offset = r2;
+    } else {
+        putc(0x89, out);
+        putc(0300 | (r2 << 3) | r1, out);
+        printf("mov %s, %s\n", reg_mnemonics_32[r1], reg_mnemonics_32[r2]);
+
+        reg_state[r2].var = -1;
+        reg_state[r2].initialised = false;
+    }
+
+    reg_state[r1].var = v2;
+    reg_state[r1].initialised = true;
+    var_state[v2].offset = r1;
+}
+
+void copy_val(u8 r1, u8 r2, FILE *out) {
+    if (r1 == r2) return;
+
+    if (reg_state[r1].initialised) {
+        error_at_line(1, 0, __FILE__, __LINE__, "tried to copy val into occupied register");
+    }
+
+    putc(0x89, out);
+    putc(0300 | (r2 << 3) | r1, out);
+    printf("mov %s, %s\n", reg_mnemonics_32[r1], reg_mnemonics_32[r2]);
+}
+
+s8 choose_reg_other_than(s8 forbidden) {
+    for (u8 j = 0; j < 4; j++) {
+        if (j != forbidden && reg_state[j].var == -1) {
+            return j;
+        }
+    }
+    return -1;
+}
+
+s8 choose_reg(void) {
+    return choose_reg_other_than(-1);
+}
+
+void deinitialise_reg(s8 reg) {
+    if (reg_state[reg].initialised) {
+        sxx var = reg_state[reg].var;
+        var_state[var] = (struct var_state){};
+        reg_state[reg].var = -1;
+        reg_state[reg].initialised = false;
+    }
+}
+
+void bind_reg(sxx var, s8 reg) {
+    assert(!reg_state[reg].initialised);
+    if (var_state[var].initialised) {
+        if (!var_state[var].reg) {
+            error_at_line(1, 0, __FILE__, __LINE__, "tried to bind to variable currently in memory - implement me!");
+        }
+        u8 old_reg = var_state[var].offset;
+        reg_state[old_reg].var = -1;
+        reg_state[old_reg].initialised = false;
+    }
+    var_state[var].initialised = true;
+    var_state[var].reg = true;
+    var_state[var].offset = reg;
+    reg_state[reg].initialised = true;
+    reg_state[reg].var = var;
+}
 
 void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
     if (!is_entry_point) error(1, 0, "Currently the only proc must be main.");
@@ -558,6 +648,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
     }
     for (sxx i = 0; i < 4; i++) {
         reg_state[i].var = -1;
+        reg_state[i].initialised = false;
     }
 
     Instruction istart = proc->istart;
@@ -577,7 +668,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                 /* mov ebx, var ; return code*/
                 putc(0x89, out);
                 putc(0300 | (reg << 3) | REG_EBX, out);
-                printf("mov ebx, %%%lu\n", var);
+                printf("mov ebx, %s\n", reg_mnemonics_32[reg]);
             }
             /* mov eax, 1   ; SC_EXIT*/
             putc(0xB8, out);
@@ -588,7 +679,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
         } else if (instr.opcode == OP_FUNC) {
             error(1, 0, "tried to compile function application");
         } else {
-            s32 reg = -1;
+            s8 reg = -1;
             if ((instr.target.mode == ARG_VAL && instr.arg2.mode == ARG_VAL
                     && instr.target.id == instr.arg2.id)
                 || (instr.arg1.mode == ARG_CONST
@@ -601,14 +692,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
             if (instr.target.mode == ARG_VAL && instr.arg1.mode == ARG_VAL
                 && instr.target.id == instr.arg1.id)
             {
-                if (!var_state[instr.arg1.id].initialised) {
-                    error(1, 0, "reading from uninitialised variable %lu",
-                        instr.arg1.id);
-                }
-                if (!var_state[instr.arg1.id].reg) {
-                    error(1, 0, "reading from non-register value");
-                }
-                reg = var_state[instr.arg1.id].offset;
+                reg = get_reg(instr.arg1.id);
             } else if (instr.target.mode == ARG_VAL
                 && var_state[instr.target.id].reg)
             {
@@ -616,48 +700,12 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                    unbind, but this will do for now. */
                 reg = var_state[instr.target.id].offset;
             } else if (instr.target.mode == ARG_VAL) {
-                for (u8 j = 0; j < 4; j++) {
-                    if (reg_state[j].var == -1) {
-                        reg = j;
-                        break;
-                    }
-                }
+                reg = choose_reg();
                 if (reg == -1) {
                     error(1, 0, "all registers are full");
                 }
             } else {
                 error(1, 0, "addresses are not yet implemented");
-            }
-            /* MOV first argument, possibly in preparation for binary ops */
-            {
-                if (instr.arg1.mode == ARG_CONST) {
-                    putc(0xB8 + reg, out);
-                    if (instr.arg1.id > 0xFFFFFFFF) {
-                        error(1, 0, "values must be 32 bit at this time");
-                    }
-                    put32(instr.arg1.id, out);
-                    printf("mov %%%lu, %lu\n", instr.target.id, instr.arg1.id);
-                } else if (instr.arg1.mode == ARG_VAL) {
-                    if (!var_state[instr.arg1.id].initialised) {
-                        error(1, 0, "reading from uninitialised variable %lu",
-                            instr.arg1.id);
-                    }
-                    if (!var_state[instr.arg1.id].reg) {
-                        error(1, 0, "reading from non-register value");
-                    }
-                    s32 read_reg = var_state[instr.arg1.id].offset;
-                    if (reg != read_reg) {
-                        putc(0x89, out);
-                        putc(0300 | (read_reg << 3) | reg, out);
-                        printf("mov %%%lu, %%%lu\n", instr.target.id, instr.arg1.id);
-                    }
-                } else {
-                    error(1, 0, "addresses are not yet implemented");
-                }
-                reg_state[reg].var = instr.target.id;
-                var_state[instr.target.id].offset = reg;
-                var_state[instr.target.id].reg = true;
-                var_state[instr.target.id].initialised = true;
             }
             s8 simple_opcode = -1;
             if (instr.opcode == OP_ADD) simple_opcode = 0;
@@ -667,6 +715,28 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
             if (instr.opcode == OP_XOR) simple_opcode = 6;
             char *simple_mnemonics[8] = {"add", "or", "adc", "sbb", "and",
                 "sub", "xor", "cmp"};
+            /* MOV first argument, possibly in preparation for binary ops */
+            if (instr.opcode == OP_MOV || simple_opcode != -1) {
+                if (instr.arg1.mode == ARG_CONST) {
+                    putc(0xB8 + reg, out);
+                    if (instr.arg1.id > 0xFFFFFFFF) {
+                        error(1, 0, "values must be 32 bit at this time");
+                    }
+                    put32(instr.arg1.id, out);
+                    printf("mov %s, %lu\n", reg_mnemonics_32[reg], instr.arg1.id);
+                } else if (instr.arg1.mode == ARG_VAL) {
+                    s32 read_reg = get_reg(instr.arg1.id);
+                    if (reg != read_reg) {
+                        putc(0x89, out);
+                        putc(0300 | (read_reg << 3) | reg, out);
+                        printf("mov %s, %s\n", reg_mnemonics_32[reg],
+                            reg_mnemonics_32[read_reg]);
+                    }
+                } else {
+                    error(1, 0, "addresses are not yet implemented");
+                }
+                bind_reg(instr.target.id, reg);
+            }
             if (simple_opcode != -1) {
                 if (instr.arg2.mode == ARG_CONST) {
                     putc(0x81, out);
@@ -675,22 +745,66 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                         error(1, 0, "values must be 32 bit at this time");
                     }
                     put32(instr.arg2.id, out);
-                    printf("%s %%%lu, %lu\n", simple_mnemonics[simple_opcode], instr.target.id, instr.arg2.id);
+                    printf("%s %s, %lu\n", simple_mnemonics[simple_opcode],
+                        reg_mnemonics_32[reg], instr.arg2.id);
                 } else if (instr.arg2.mode == ARG_VAL) {
-                    if (!var_state[instr.arg2.id].initialised) {
-                        error(1, 0, "reading from uninitialised variable %lu",
-                            instr.arg2.id);
-                    }
-                    if (!var_state[instr.arg2.id].reg) {
-                        error(1, 0, "reading from non-register value");
-                    }
-                    s32 read_reg = var_state[instr.arg2.id].offset;
+                    u8 read_reg = get_reg(instr.arg2.id);
                     putc(0001 | (simple_opcode << 3), out);
                     putc(0300 | (read_reg << 3) | reg, out);
-                    printf("%s %%%lu, %%%lu\n", simple_mnemonics[simple_opcode], instr.target.id, instr.arg2.id);
+                    printf("%s %s, %s\n", simple_mnemonics[simple_opcode],
+                        reg_mnemonics_32[reg], reg_mnemonics_32[read_reg]);
                 } else {
                     error(1, 0, "addresses are not yet implemented");
                 }
+            } else if (instr.opcode == OP_MUL) {
+                s64 val1_var = instr.arg1.id; /* var we want in eax */
+                s64 val2_var = instr.arg2.id; /* var we could put in edx */
+                if (var_state[val1_var].offset == REG_EDX || var_state[val2_var].offset == REG_EAX) {
+                    val1_var = instr.arg2.id;
+                    val2_var = instr.arg1.id;
+                }
+                bool val1_destructive = val1_var == instr.target.id;
+                bool val2_destructive = val2_var == instr.target.id && val1_var != val2_var;
+                s8 val1_reg = get_reg(val1_var);
+                s8 val2_reg = get_reg(val2_var);
+
+                if (reg_state[REG_EAX].initialised) {
+                    if (val1_destructive) {
+                        relocate_var(REG_EAX, val1_var, out);
+                        val1_reg = REG_EAX;
+                        if (val1_var == val2_var) {
+                            val2_reg = REG_EAX;
+                        }
+                    } else {
+                        s8 reg = choose_reg_other_than(REG_EDX);
+                        if (reg == -1) {
+                            error(1, 0, "all registers are full");
+                        }
+                        relocate_var(reg, reg_state[REG_EAX].var, out);
+                    }
+                }
+                copy_val(REG_EAX, val1_reg, out);
+                if (reg_state[REG_EDX].initialised) {
+                    if (val2_destructive) {
+                        relocate_var(REG_EDX, val2_var, out);
+                        val2_reg = REG_EDX;
+                    } else {
+                        s8 reg = choose_reg_other_than(REG_EAX);
+                        if (reg == -1) {
+                            error(1, 0, "all registers are full");
+                        }
+                        relocate_var(reg, reg_state[REG_EDX].var, out);
+                    }
+                }
+
+                putc(0xF7, out);
+                putc(0340 | val2_reg, out);
+                /* should just emit actual assembly with registers */
+                printf("mul %s\n", reg_mnemonics_32[val2_reg]);
+
+                deinitialise_reg(REG_EAX);
+                deinitialise_reg(REG_EDX);
+                bind_reg(instr.target.id, REG_EAX);
             } else if (instr.opcode != OP_MOV) {
                 error(1, 0, "Opcode %d not yet supported in compilation", instr.opcode);
             }
