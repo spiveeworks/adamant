@@ -1,15 +1,57 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <error.h>
 #include <errno.h>
 #include <assert.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 
 #include <sys/stat.h>
 
 #include "adm_types.h"
+
+#ifdef __unix__
+#include <error.h>
+#else
+void error(int exit_status, int error_num, const char *fmt, ...) {
+    fflush(stdout);
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+
+    if (error_num != 0) fprintf(stderr, " (errno = %d\n)", error_num);
+    else fprintf(stderr, "\n");
+
+    if (exit_status != 0) exit(exit_status);
+}
+
+void error_at_line(
+    int exit_status,
+    int error_num,
+    char *file_name,
+    unsigned line_num,
+    char *fmt,
+    ...
+) {
+    fflush(stdout);
+
+    fprintf(stderr, "Error in file %s, line %u, ", file_name, line_num);
+
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+
+    if (error_num != 0) fprintf(stderr, " (errno = %d\n)", error_num);
+    else fprintf(stderr, "\n");
+
+    if (exit_status != 0) exit(exit_status);
+}
+
+#endif
 
 #define ARRAY_SIZE(x) (sizeof (x) / sizeof *(x))
 
@@ -19,7 +61,10 @@ typedef struct {
 } str;
 
 char *cstr(str str) {
-    return strndup(str.data, str.size);
+    char *out = malloc(str.size + 1);
+    memcpy(out, str.data, str.size);
+    out[str.size] = '\0';
+    return out;
 }
 
 bool str_eq(str a, str b) {
@@ -262,6 +307,10 @@ u64 read_ref(struct ref ref) {
     case ARG_STACK_OFFSET:
         error(1, 0, "tried to read stack offset as arithmetic value");
         return -1;
+    default:
+        error_at_line(1, 0, __FILE__, __LINE__,
+            "Unexpected ref.mode value %d.", ref.mode);
+        return -1;
     }
 }
 
@@ -455,7 +504,7 @@ void execute_function(struct func *func, s64 offset) {
         if (iptr->opcode == OP_FUNC) {
             sxx func_id = read_ref(iptr->arg1);
             if (func_id < 0 || func_id >= func_count) {
-                error(1, 0, "%ld is not a valid function pointer", func_id);
+                error(1, 0, "%lld is not a valid function pointer", func_id);
             }
             if (iptr->arg2.mode != ARG_STACK_OFFSET) {
                 error(1, 0, "got function call without stack offset");
@@ -555,7 +604,7 @@ struct local_state {
 
 u8 get_reg(u64 var) {
     if (!var_state[var].initialised) {
-        error(1, 0, "reading from uninitialised variable %lu", var);
+        error(1, 0, "reading from uninitialised variable %llu", var);
     }
     if (!var_state[var].reg) {
         error(1, 0, "reading from non-register value");
@@ -616,7 +665,7 @@ s8 choose_reg(void) {
 void deinitialise_reg(s8 reg) {
     if (reg_state[reg].initialised) {
         sxx var = reg_state[reg].var;
-        var_state[var] = (struct var_state){};
+        var_state[var] = (struct var_state){0};
         reg_state[reg].var = -1;
         reg_state[reg].initialised = false;
     }
@@ -643,7 +692,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
     if (!is_entry_point) error(1, 0, "Currently the only proc must be main.");
 
     for (sxx i = 0; i < STATIC_VAR_CAP; i++) {
-        var_state[i] = (struct var_state){};
+        var_state[i] = (struct var_state){0};
         local_state[i].var = -1;
     }
     for (sxx i = 0; i < 4; i++) {
@@ -723,7 +772,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                         error(1, 0, "values must be 32 bit at this time");
                     }
                     put32(instr.arg1.id, out);
-                    printf("mov %s, %lu\n", reg_mnemonics_32[reg], instr.arg1.id);
+                    printf("mov %s, %llu\n", reg_mnemonics_32[reg], instr.arg1.id);
                 } else if (instr.arg1.mode == ARG_VAL) {
                     s32 read_reg = get_reg(instr.arg1.id);
                     if (reg != read_reg) {
@@ -745,7 +794,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
                         error(1, 0, "values must be 32 bit at this time");
                     }
                     put32(instr.arg2.id, out);
-                    printf("%s %s, %lu\n", simple_mnemonics[simple_opcode],
+                    printf("%s %s, %llu\n", simple_mnemonics[simple_opcode],
                         reg_mnemonics_32[reg], instr.arg2.id);
                 } else if (instr.arg2.mode == ARG_VAL) {
                     u8 read_reg = get_reg(instr.arg2.id);
@@ -1037,7 +1086,7 @@ void op_stack_push(struct op_stack *stack, struct partial_instruction *rhs) {
     }
     stack->lhs[stack->lhs_count] = *rhs;
     stack->lhs_count += 1;
-    *rhs = (struct partial_instruction){};
+    *rhs = (struct partial_instruction){0};
 }
 
 void op_stack_finish(
@@ -1075,7 +1124,7 @@ void op_stack_push_unary(
         error(1, 0, "too many nested expressions");
     }
     uxx i = stack->lhs_count;
-    stack->lhs[i].arg = (struct ref){};
+    stack->lhs[i].arg = (struct ref){0};
     stack->lhs[i].op = op;
     stack->lhs[i].precedence = precedence;
     stack->lhs[i].close_token = '\0';
@@ -1091,7 +1140,7 @@ void op_stack_push_bracket(
         error(1, 0, "too many nested expressions");
     }
     uxx i = stack->lhs_count;
-    stack->lhs[i].arg = (struct ref){};
+    stack->lhs[i].arg = (struct ref){0};
     stack->lhs[i].op = OP_NULL;
     stack->lhs[i].precedence = PRECEDENCE_GROUPING;
     stack->lhs[i].close_token = close_token;
@@ -1149,9 +1198,9 @@ void run(char *stream) {
         MODE_EXPR_FLUSH_COMMA,
         MODE_EXPR_FLUSH_FINAL
     } parse_state = MODE_INIT;
-    struct op_stack op_stack = {};
-    struct ref target = {};
-    struct partial_instruction rhs = {};
+    struct op_stack op_stack = {0};
+    struct ref target = {0};
+    struct partial_instruction rhs = {0};
     str varname;
     token_id close_token;
     bool is_func_statement = false;
@@ -1440,7 +1489,7 @@ void run(char *stream) {
                 if (token.id != ';') {
                     error(1, 0, "expected ';', got \"%s\"", cstr(token.substr));
                 }
-                rhs = (struct partial_instruction){};
+                rhs = (struct partial_instruction){0};
                 /* TODO: type check that the number of arguments is correct.
                    Requires function pointer types if we want non-constant
                    function application */
@@ -1472,7 +1521,7 @@ void run(char *stream) {
             } else if (op_stack.lhs_count != 0) {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
             } else {
-                rhs = (struct partial_instruction){};
+                rhs = (struct partial_instruction){0};
                 parse_state = MODE_EXPR;
             }
             break;
@@ -1482,8 +1531,8 @@ void run(char *stream) {
             }
             if (op_stack_can_finish(&op_stack)) {
                 op_stack_finish(&op_stack, target, rhs.arg, &instruction);
-                target = (struct ref){};
-                rhs = (struct partial_instruction){};
+                target = (struct ref){0};
+                rhs = (struct partial_instruction){0};
                 parse_state = MODE_INIT;
             } else {
                 op_stack_pop(&op_stack, &rhs.arg, &instruction);
@@ -1529,7 +1578,7 @@ str read_file(char *path) {
     FILE *input = NULL;
     str contents;
 
-    input = fopen(path, "r");
+    input = fopen(path, "rb"); /* No funny business with line endings! */
     if (!input) {
         error(1, errno, "error opening file %s", path);
     }
@@ -1570,16 +1619,16 @@ int main(int argc, char **argv) {
 
     for (uxx i = 0; i < global_var_count; i++) {
         str varname = static_vars[i].name;
-        char *cstr = strndup(varname.data, varname.size);
+        char *varname_c = cstr(varname);
         switch(static_vars[i].decl_type) {
         case DECL_VAL:
-            printf("%s := %ld\n", cstr, static_vars[i].val);
+            printf("%s := %lld\n", varname_c, static_vars[i].val);
             break;
         case DECL_VAR:
-            printf("var %s = %ld\n", cstr, static_vars[i].val);
+            printf("var %s = %lld\n", varname_c, static_vars[i].val);
             break;
         case DECL_LOCAL:
-            printf("local %s = %ld\n", cstr, *lookup(static_vars[i].val));
+            printf("local %s = %lld\n", varname_c, *lookup(static_vars[i].val));
             break;
         }
     }
