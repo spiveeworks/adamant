@@ -579,6 +579,178 @@ FILE* start_elf(char *path) {
     return out;
 }
 
+FILE* start_exe(char *path) {
+    FILE *out = fopen(path, "wb");
+    if (!out) {
+        error_at_line(1, errno, __FILE__, __LINE__, "Failed to open \"%s\" for writing.", path);
+    }
+    if (chmod(path, 0755) < 0) {
+        error_at_line(1, 0, __FILE__, __LINE__, "Failed to change permissions for \"%s\".", path);
+    }
+
+    /* DOS Header */
+    putc('M', out);
+    putc('Z', out);
+    for (int i = 0; i < 58; i++) putc(0, out);
+    put32(64, out);
+
+    /* PE Header */
+    putc('P', out);
+    putc('E', out);
+    putc(0, out);
+    putc(0, out);
+    put16(0x14C, out); /* Intel i386 */
+    put16(3, out); /* Number of sections */
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put16(0xE0, out); /* Size of optional header */
+    put16(0x102, out); /* Characteristics: 32bit, EXE */
+
+    /* Optional Header */
+    put16(0x10b, out); /* Magic?? 32b? */
+    put16(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0x1000, out); /* Entry point */
+    put32(0, out);
+    put32(0, out);
+    put32(0x400000, out); /* Image Base */
+    put32(0x1000, out); /* Section Alignment */
+    put32(0x200, out); /* File Alignment */
+    put32(0, out);
+    put32(0, out);
+    put16(4, out); /* Major Subsystem Version, NT 4 or later */
+    put16(0, out);
+    put32(0, out);
+    put32(0x4000, out); /* Size of image */
+    put32(0x200, out); /* Size of headers */
+    put32(0, out);
+    put16(2, out); /* Subsystem? GUI? */
+    put16(2, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(16, out); /* Number of Rva and sizes */
+
+    /* Data directories */
+    put32(0, out);
+    put32(0, out);
+    put32(0x2000, out);
+    for (int i = 0; i < (0x138 - 0xc4); i++) putc(0, out);
+
+    /* Sections table */
+    fwrite(".text\0\0\0", 1, 8, out);
+    put32(0x1000, out); /* Virtual Size (Relative) */
+    put32(0x1000, out); /* Virtual Address (Relative) */
+    put32(0x200, out); /* Size of raw data */
+    put32(0x200, out); /* Pointer to raw data (offset?) */
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0x60000020, out); /* CODE EXECUTE READ */
+
+    fwrite(".rdata\0\0", 1, 8, out);
+    put32(0x1000, out); /* Virtual Size (Relative) */
+    put32(0x2000, out); /* Virtual Address (Relative) */
+    put32(0x200, out); /* Size of raw data */
+    put32(0x400, out); /* Pointer to raw data (offset?) */
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0x40000040, out); /* INITIALIZED READ */
+
+    fwrite(".data\0\0\0", 1, 8, out);
+    put32(0x1000, out); /* Virtual Size (Relative) */
+    put32(0x3000, out); /* Virtual Address (Relative) */
+    put32(0x200, out); /* Size of raw data */
+    put32(0x600, out); /* Pointer to raw data (offset?) */
+    put32(0, out);
+    put32(0, out);
+    put32(0, out);
+    put32(0xC0000040, out); /* DATA READ WRITE */
+
+    fseek(out, 0x200, SEEK_SET);
+
+    return out;
+}
+
+void end_exe(FILE *out) {
+    /* DLL Magic */
+    fseek(out, 0x400, SEEK_SET);
+
+    char *modules[] = {"kernel32.dll", "user32.dll"};
+    int module_count = ARRAY_SIZE(modules);
+
+    char *imports[] = {"ExitProcess", "MessageBoxA"};
+    int import_modules[ARRAY_SIZE(imports)] = {0, 1};
+    int import_count = ARRAY_SIZE(imports);
+
+    int name_table_start = 0x2000 + (import_count + 1) * 20;
+    int import_symbols_start = name_table_start + import_count * 8;
+
+    int next_import_name_address = import_symbols_start;
+    int name_addresses[ARRAY_SIZE(imports)];
+    for (int i = 0; i < import_count; i++) {
+        name_addresses[i] = next_import_name_address;
+        next_import_name_address += 2 + strlen(imports[i]) + 1;
+    }
+    int address_table_start = next_import_name_address;
+
+    int next_module_name_address = address_table_start + import_count * 8;
+    int module_name_addresses[ARRAY_SIZE(modules)];
+    for (int i = 0; i < module_count; i++) {
+        module_name_addresses[i] = next_module_name_address;
+        next_module_name_address += strlen(modules[i]) + 1;
+    }
+
+    for (int i = 0; i < import_count; i++) {
+        put32(name_table_start + i * 8, out); /* Pointer into INT */
+        put32(0, out);
+        put32(0, out);
+        put32(module_name_addresses[import_modules[i]], out);
+        printf("%s: %X\n", imports[i], address_table_start + i * 8);
+        put32(address_table_start + i * 8, out); /* Pointer into IAT */
+    }
+    /* One blank entry at the end. */
+    for (int i = 0; i < 5; i++) put32(0, out);
+
+    /* Import Name Table (INT) */
+    for (int i = 0; i < import_count; i++) {
+        put32(name_addresses[i], out); /* Actual address of name. */
+        put32(0, out);
+    }
+
+    /* The actual import names */
+    for (int i = 0; i < import_count; i++) {
+        put16(0, out);
+        fwrite(imports[i], 1, strlen(imports[i]) + 1, out);
+    }
+
+    /* Import Address Table (IAT) */
+    for (int i = 0; i < import_count; i++) {
+        /* In the EXE this is just a copy of the INT. Replaced at startup. */
+        put32(name_addresses[i], out);
+        put32(0, out);
+    }
+
+    /* The actual module names */
+    for (int i = 0; i < module_count; i++) {
+        fwrite(modules[i], 1, strlen(modules[i]) + 1, out);
+    }
+
+    fseek(out, 0x600, SEEK_SET);
+    char *text = "Hello World!";
+    fwrite(text, 1, strlen(text) + 1, out);
+    fseek(out, 0x7FF, SEEK_SET);
+    putc(0, out);
+
+    fclose(out);
+}
+
 struct var_state {
     u64 offset;
     bool reg;
@@ -688,7 +860,17 @@ void bind_reg(sxx var, s8 reg) {
     reg_state[reg].var = var;
 }
 
-void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
+enum platform {
+    PLATFORM_LINUX,
+    PLATFORM_WINDOWS,
+};
+
+void compile_proc(
+    struct func *proc,
+    bool is_entry_point,
+    enum platform platform,
+    FILE *out
+) {
     if (!is_entry_point) error(1, 0, "Currently the only proc must be main.");
 
     for (sxx i = 0; i < STATIC_VAR_CAP; i++) {
@@ -706,25 +888,55 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
     for (u64 i = 0; i < icount; i++) {
         struct instruction instr = istart[i];
         if (instr.opcode == OP_EXIT) {
-            assert(instr.arg1.mode == ARG_STACK_OFFSET);
-            sxx var = instr.arg1.id;
-            if (!var_state[var].initialised) {
-                error(1, 0, "exit with uninitialised variable");
+            if (platform == PLATFORM_LINUX) {
+                assert(instr.arg1.mode == ARG_STACK_OFFSET);
+                sxx var = instr.arg1.id;
+                if (!var_state[var].initialised) {
+                    error(1, 0, "exit with uninitialised variable");
+                }
+                assert(var_state[var].reg);
+                sxx reg = var_state[var].offset;
+
+                if (reg != REG_EBX) {
+                    /* mov ebx, var ; return code*/
+                    putc(0x89, out);
+                    putc(0300 | (reg << 3) | REG_EBX, out);
+                    printf("mov ebx, %s\n", reg_mnemonics_32[reg]);
+                }
+                /* mov eax, 1   ; SC_EXIT*/
+                putc(0xB8, out);
+                put32(1, out);
+                /* int 0x80     ; system call*/
+                putc(0xCD, out);
+                putc(0x80, out);
+            } else if (platform == PLATFORM_WINDOWS) {
+                printf("Calling MessageBoxA\n");
+                /* push 0 */
+                putc(0x6A, out);
+                putc(0, out);
+                /* push .data + 0 */
+                putc(0x68, out);
+                put32(0x403000, out);
+                /* push .data + 0 */
+                putc(0x68, out);
+                put32(0x403000, out);
+                /* push 0 */
+                putc(0x6A, out);
+                putc(0, out);
+                /* call MessageBoxA */
+                putc(0xFF, out);
+                putc(0x15, out);
+                put32(0x402070, out);
+
+                printf("Calling ExitProcess\n");
+                /* push 0 */
+                putc(0x6A, out);
+                putc(199, out);
+                /* call ExitProcess */
+                putc(0xFF, out);
+                putc(0x15, out);
+                put32(0x402068, out);
             }
-            assert(var_state[var].reg);
-            sxx reg = var_state[var].offset;
-            if (reg != REG_EBX) {
-                /* mov ebx, var ; return code*/
-                putc(0x89, out);
-                putc(0300 | (reg << 3) | REG_EBX, out);
-                printf("mov ebx, %s\n", reg_mnemonics_32[reg]);
-            }
-            /* mov eax, 1   ; SC_EXIT*/
-            putc(0xB8, out);
-            put32(1, out);
-            /* int 0x80     ; system call*/
-            putc(0xCD, out);
-            putc(0x80, out);
         } else if (instr.opcode == OP_FUNC) {
             error(1, 0, "tried to compile function application");
         } else {
@@ -862,7 +1074,7 @@ void compile_proc(struct func *proc, bool is_entry_point, FILE *out) {
     printf("\n");
 }
 
-void compile(FILE *out) {
+void compile(enum platform platform, FILE *out) {
     int entry_point = 0;
     str entrypoint_name = {4, "main"};
     for (u64 i = 0; i < global_var_count; i++) {
@@ -872,7 +1084,7 @@ void compile(FILE *out) {
     }
     for (u64 i = 0; i < func_count; i++) {
         if (funcs[i].mod == FUNC_PROC) {
-            compile_proc(&funcs[i], i == entry_point, out);
+            compile_proc(&funcs[i], i == entry_point, platform, out);
         }
     }
 }
@@ -1612,9 +1824,18 @@ int main(int argc, char **argv) {
     run(input.data);
 
     if (argc > 2) {
-        output = start_elf(argv[2]);
-        compile(output);
-        end_elf(output);
+        char *output_path = argv[2];
+        int size = strlen(output_path);
+        if (size > 4 && strncmp(&output_path[size-4], ".exe", 4) == 0) {
+            printf("Asked for .exe format, building 32-bit Windows binary.\n");
+            output = start_exe(argv[2]);
+            compile(PLATFORM_WINDOWS, output);
+            end_exe(output);
+        } else {
+            output = start_elf(argv[2]);
+            compile(PLATFORM_LINUX, output);
+            end_elf(output);
+        }
     }
 
     for (uxx i = 0; i < global_var_count; i++) {
